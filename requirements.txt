@@ -1,0 +1,40 @@
+# E*TRADE API
+pyetrade>=2.1.0
+
+# News scraping
+yfinance>=0.2.36
+feedparser>=6.0.11
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+lxml>=5.0.0
+
+# AI Analysis (pick one or both)
+google-genai>=1.0.0          # FREE tier available (new SDK)
+anthropic>=0.40.0            # Paid (optional, only if LLM_BACKEND=claude)
+
+# Email (Gmail API OAuth2)
+google-auth>=2.27.0
+google-auth-oauthlib>=1.2.0
+google-api-python-client>=2.114.0
+
+# Scheduling
+schedule>=1.2.0
+APScheduler>=3.10.0
+
+# Configuration
+python-dotenv>=1.0.0
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+
+# Utilities
+rich>=13.7.0
+loguru>=0.7.0
+
+# Development
+pytest>=8.0.0
+pytest-cov>=4.1.0
+pytest-asyncio>=0.23.0
+black>=24.0.0
+ruff>=0.2.0
+mypy>=1.8.0
+pre-commit>=3.6.0
