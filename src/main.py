@@ -1,183 +1,298 @@
 """
-E*TRADE Stock Monitor - Main Orchestrator
+E*TRADE Stock Monitor — Main Orchestrator
 
-Schedules pre-market and post-market reports.
-Can also be run once for testing with --once flag.
+Schedule (Mon–Fri, ET):
+  08:30  Pre-market   — overnight news, opening trade plan
+  12:00  Mid-day      — morning recap, updated position calls
+  16:30  Post-market  — day summary, upcoming events & earnings outlook
+
+Portfolio auth:
+  - Full E*TRADE re-auth only when cache is older than PORTFOLIO_CACHE_DAYS (default 7)
+  - Daily token renewal is silent (no PIN needed) while within the same calendar day
+  - Telegram bot delivers auth PIN to your phone when re-auth is required
+
+CLI flags:
+  --once                 Run one report immediately and exit
+  --type pre_market|mid_market|post_market
+  --refresh-portfolio    Force re-auth with E*TRADE and update the portfolio cache
+  --schedule             Run the scheduler (default when no flags given)
 """
 
 import argparse
-import sys
 import signal
+import sys
 from datetime import datetime
-from zoneinfo import ZoneInfo
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # Python < 3.9
+    from backports.zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from src.etrade.auth import ETradeAuth
-from src.etrade.portfolio import PortfolioReader
+from src.etrade.portfolio import (
+    PortfolioReader,
+    PortfolioSummary,
+    fetch_earnings_calendar,
+    load_portfolio_from_cache,
+)
 from src.news.scraper import NewsScraper
 from src.analysis.analyzer import StockAnalyzer
 from src.email.sender import EmailSender
 from src.utils.config import get_settings
 from src.utils.logger import get_logger
+from src.utils.telegram_bot import make_notifier
 
 logger = get_logger(__name__)
 
 
 class StockMonitor:
-    """Main orchestrator that ties all modules together."""
+    """Main orchestrator."""
 
     def __init__(self) -> None:
         self.settings = get_settings()
         self._validate_settings()
+        self.notifier = make_notifier(self.settings)
         self.news_scraper = NewsScraper(self.settings)
         self.analyzer = StockAnalyzer(self.settings)
         self.email_sender = EmailSender(self.settings)
         self._auth: ETradeAuth | None = None
-        self._portfolio_reader: PortfolioReader | None = None
+
+    # -------------------------------------------------------------------------
+    # Validation
+    # -------------------------------------------------------------------------
 
     def _validate_settings(self) -> None:
-        """Validate that required settings are present."""
         errors = []
         if not self.settings.etrade_consumer_key:
             errors.append("ETRADE_CONSUMER_KEY not set")
         if not self.settings.etrade_consumer_secret:
             errors.append("ETRADE_CONSUMER_SECRET not set")
 
-        # LLM backend validation
         backend = self.settings.llm_backend.lower()
         if backend == "gemini" and not self.settings.gemini_api_key:
             errors.append("GEMINI_API_KEY not set (required for LLM_BACKEND=gemini)")
         elif backend == "claude" and not self.settings.anthropic_api_key:
             errors.append("ANTHROPIC_API_KEY not set (required for LLM_BACKEND=claude)")
 
-        # Email backend validation
         if not self.settings.gmail_address:
             errors.append("GMAIL_ADDRESS not set")
         if not self.settings.recipient_email:
             errors.append("RECIPIENT_EMAIL not set")
-        if self.settings.email_backend.lower() == "smtp" and not self.settings.gmail_app_password:
+        if (self.settings.email_backend.lower() == "smtp"
+                and not self.settings.gmail_app_password):
             errors.append("GMAIL_APP_PASSWORD not set (required for EMAIL_BACKEND=smtp)")
 
-        if errors:
-            for e in errors:
-                logger.warning(f"⚠️  Missing config: {e}")
-            logger.warning(
-                "Some features may not work. Edit .env and fill in the missing values."
-            )
+        for e in errors:
+            logger.warning(f"⚠️  Missing config: {e}")
 
-    def _ensure_authenticated(self) -> None:
-        """Ensure E*TRADE authentication is active."""
-        if not self._auth:
-            self._auth = ETradeAuth(self.settings)
+    # -------------------------------------------------------------------------
+    # Portfolio: cache-first, E*TRADE on expiry
+    # -------------------------------------------------------------------------
 
-        token, secret = self._auth.authenticate()
-        self._portfolio_reader = PortfolioReader(self.settings, token, secret)
-
-    def run_report(self, report_type: str = "pre_market") -> None:
+    def _get_portfolio(self, force_refresh: bool = False) -> PortfolioSummary | None:
         """
-        Execute a single report cycle:
-          1. Authenticate with E*TRADE
-          2. Fetch portfolio positions
-          3. Scrape news for each holding
-          4. Analyze news with Claude AI
-          5. Send email report
+        Return portfolio — from cache + live yfinance prices if fresh,
+        or from E*TRADE if cache is expired or force_refresh=True.
         """
+        if not force_refresh and self.settings.portfolio_cache_days > 0:
+            cached = load_portfolio_from_cache(self.settings)
+            if cached:
+                logger.info(
+                    f"Using cached portfolio ({len(cached.positions)} positions, "
+                    f"prices live via yfinance)."
+                )
+                return cached
+
+        # Need E*TRADE auth
+        logger.info("Portfolio cache expired or force-refresh — authenticating with E*TRADE...")
+        try:
+            if not self._auth:
+                self._auth = ETradeAuth(self.settings, notifier=self.notifier)
+            token, secret = self._auth.authenticate()
+            reader = PortfolioReader(self.settings, token, secret)
+            portfolio = reader.get_portfolio()
+            return portfolio
+        except Exception as e:
+            logger.error(f"E*TRADE auth/portfolio fetch failed: {e}")
+            if self.notifier:
+                self.notifier.send_error("E*TRADE auth failed", str(e))
+            # Last resort: try stale cache rather than sending nothing
+            stale = load_portfolio_from_cache(self.settings)
+            if stale:
+                logger.warning("Using stale portfolio cache as fallback.")
+                return stale
+            return None
+
+    # -------------------------------------------------------------------------
+    # Report runner
+    # -------------------------------------------------------------------------
+
+    def run_report(
+        self,
+        report_type: str = "pre_market",
+        force_portfolio_refresh: bool = False,
+    ) -> None:
         tz = ZoneInfo(self.settings.timezone)
         now = datetime.now(tz)
-        logger.info(f"{'='*60}")
-        logger.info(f"Running {report_type} report at {now.strftime('%Y-%m-%d %H:%M %Z')}")
-        logger.info(f"{'='*60}")
+        label_map = {
+            "pre_market": "Pre-Market",
+            "mid_market": "Mid-Day",
+            "post_market": "Post-Market",
+        }
+        label = label_map.get(report_type, report_type)
 
-        # Step 1: Authenticate
-        logger.info("[1/5] Authenticating with E*TRADE...")
-        try:
-            self._ensure_authenticated()
-        except Exception as e:
-            logger.error(f"Authentication failed: {e}")
+        logger.info("=" * 60)
+        logger.info(f"Running {label} report — {now.strftime('%Y-%m-%d %H:%M %Z')}")
+        logger.info("=" * 60)
+
+        # Step 1: Portfolio
+        logger.info("[1/5] Loading portfolio...")
+        portfolio = self._get_portfolio(force_refresh=force_portfolio_refresh)
+        if not portfolio or not portfolio.positions:
+            msg = "No portfolio positions available. Skipping report."
+            logger.warning(msg)
+            if self.notifier:
+                self.notifier.send_error(f"{label} report skipped", msg)
             return
 
-        # Step 2: Fetch portfolio
-        logger.info("[2/5] Fetching portfolio positions...")
-        try:
-            portfolio = self._portfolio_reader.get_portfolio()
-        except Exception as e:
-            logger.error(f"Failed to fetch portfolio: {e}")
-            return
-
-        if not portfolio.positions:
-            logger.warning("No positions found in portfolio. Skipping report.")
-            return
-
-        # Deduplicate symbols (same stock can appear in multiple lots)
         unique_symbols = list(dict.fromkeys(portfolio.symbols))
         logger.info(
-            f"Found {len(portfolio.positions)} positions "
-            f"({len(unique_symbols)} unique): {', '.join(unique_symbols)}"
+            f"  {len(portfolio.positions)} positions "
+            f"({'cached+yfinance' if portfolio.from_cache else 'live E*TRADE'}) "
+            f"— {', '.join(unique_symbols)}"
         )
 
-        # Step 3: Fetch news for all holdings
-        logger.info("[3/5] Fetching news for all holdings...")
+        # Step 2: Fetch news
+        logger.info("[2/5] Fetching news...")
         news_by_symbol = self.news_scraper.fetch_all_news(unique_symbols)
         total_news = sum(len(v) for v in news_by_symbol.values())
-        logger.info(f"Fetched {total_news} total articles across all holdings")
+        logger.info(f"  {total_news} articles fetched")
 
-        # Step 4: Select top 5 cross-portfolio + analyze with Claude (single call)
+        # Step 3: Rank news
         top_n = self.settings.top_news_count
-        logger.info(f"[4/5] Selecting top {top_n} news across portfolio and analyzing...")
+        logger.info(f"[3/5] Selecting top {top_n} cross-portfolio articles...")
         top_articles = self.news_scraper.select_top_portfolio_news(
             news_by_symbol, portfolio.positions, top_n=top_n
         )
-        portfolio_analysis = self.analyzer.analyze_top_news(top_articles, portfolio.positions)
 
-        # Step 5: Send email
-        logger.info("[5/5] Sending email report...")
-        success = self.email_sender.send_report(
-            portfolio, portfolio_analysis, report_type
+        # Step 4: Fetch earnings calendar for post-market
+        earnings_data = {}
+        if report_type == "post_market":
+            logger.info("[4/5] Fetching earnings calendar...")
+            earnings_data = fetch_earnings_calendar(unique_symbols)
+            if earnings_data:
+                upcoming = ", ".join(
+                    f"{s} ({d['earnings_date']})"
+                    for s, d in earnings_data.items()
+                )
+                logger.info(f"  Upcoming earnings: {upcoming}")
+        else:
+            logger.info("[4/5] Skipping earnings calendar (pre/mid-market)")
+
+        # Step 5: AI analysis
+        logger.info(f"[5/5] Running {label} AI analysis...")
+        analysis = self.analyzer.analyze_top_news(
+            top_articles,
+            portfolio.positions,
+            report_type=report_type,
+            earnings_data=earnings_data,
         )
+
+        # Step 6: Send email
+        logger.info("[6/6] Sending email...")
+        success = self.email_sender.send_report(portfolio, analysis, report_type)
 
         if success:
-            logger.info("✅ Report sent successfully!")
+            logger.info(f"✅ {label} report sent.")
+            if self.notifier:
+                # Silent confirmation — no buzz
+                self.notifier.send_info(
+                    f"📧 {label} report sent at {now.strftime('%H:%M ET')}"
+                )
         else:
-            logger.error("❌ Failed to send report.")
+            logger.error(f"❌ Failed to send {label} report.")
+            if self.notifier:
+                self.notifier.send_error(f"{label} email failed", "Check logs.")
+
+    # -------------------------------------------------------------------------
+    # Scheduler
+    # -------------------------------------------------------------------------
+
+    def refresh_portfolio_cache(self) -> None:
+        """
+        Weekly job: re-auth with E*TRADE, update the portfolio cache.
+        Does NOT send an email — purely a background cache refresh.
+        Runs Sunday noon so weekday reports always have a fresh cache.
+        """
+        logger.info("=" * 60)
+        logger.info("Weekly portfolio cache refresh (E*TRADE re-auth)")
+        logger.info("=" * 60)
+        if self.notifier:
+            self.notifier.send_message(
+                "🔄 <b>Weekly portfolio refresh</b>\n"
+                "Connecting to E*TRADE to update your holdings cache..."
+            )
+        try:
+            if not self._auth:
+                self._auth = ETradeAuth(self.settings, notifier=self.notifier)
+            token, secret = self._auth.authenticate()
+            reader = PortfolioReader(self.settings, token, secret)
+            portfolio = reader.get_portfolio()
+            logger.info(
+                f"✅ Cache refreshed: {len(portfolio.positions)} positions, "
+                f"${portfolio.total_market_value:,.2f}"
+            )
+            if self.notifier:
+                symbols = ", ".join(dict.fromkeys(portfolio.symbols))
+                self.notifier.send_info(
+                    f"✅ Portfolio cache updated\n"
+                    f"{len(portfolio.positions)} positions: {symbols}"
+                )
+        except Exception as e:
+            logger.error(f"Weekly portfolio refresh failed: {e}")
+            if self.notifier:
+                self.notifier.send_error("Weekly portfolio refresh failed", str(e))
 
     def start_scheduler(self) -> None:
-        """Start the APScheduler to run reports at configured times."""
         tz = ZoneInfo(self.settings.timezone)
         scheduler = BlockingScheduler(timezone=tz)
+        s = self.settings
 
-        # Pre-market job
+        # ── Weekday report jobs ──────────────────────────────────────────────
+        report_jobs = [
+            (s.pre_market_hour,  s.pre_market_minute,  "pre_market",  "Pre-Market"),
+            (s.mid_market_hour,  s.mid_market_minute,  "mid_market",  "Mid-Day"),
+            (s.post_market_hour, s.post_market_minute, "post_market", "Post-Market"),
+        ]
+        for hour, minute, rtype, name in report_jobs:
+            scheduler.add_job(
+                self.run_report,
+                CronTrigger(
+                    hour=hour, minute=minute,
+                    day_of_week="mon-fri", timezone=tz,
+                ),
+                args=[rtype],
+                id=f"{rtype}_report",
+                name=f"{name} Report",
+                misfire_grace_time=600,
+            )
+
+        # ── Weekly portfolio refresh (Sunday noon by default) ────────────────
         scheduler.add_job(
-            self.run_report,
+            self.refresh_portfolio_cache,
             CronTrigger(
-                hour=self.settings.pre_market_hour,
-                minute=self.settings.pre_market_minute,
-                day_of_week="mon-fri",
+                hour=s.portfolio_refresh_hour,
+                minute=s.portfolio_refresh_minute,
+                day_of_week=s.portfolio_refresh_day,
                 timezone=tz,
             ),
-            args=["pre_market"],
-            id="pre_market_report",
-            name="Pre-Market Report",
-            misfire_grace_time=600,
+            id="weekly_portfolio_refresh",
+            name="Weekly Portfolio Refresh",
+            misfire_grace_time=3600,   # 1-hour grace — fires even if Mac was asleep
         )
 
-        # Post-market job
-        scheduler.add_job(
-            self.run_report,
-            CronTrigger(
-                hour=self.settings.post_market_hour,
-                minute=self.settings.post_market_minute,
-                day_of_week="mon-fri",
-                timezone=tz,
-            ),
-            args=["post_market"],
-            id="post_market_report",
-            name="Post-Market Report",
-            misfire_grace_time=600,
-        )
-
-        # Graceful shutdown
         def shutdown(signum, frame):
             logger.info("Shutting down scheduler...")
             scheduler.shutdown(wait=False)
@@ -186,40 +301,71 @@ class StockMonitor:
         signal.signal(signal.SIGINT, shutdown)
         signal.signal(signal.SIGTERM, shutdown)
 
-        logger.info(f"📅 Scheduler started ({self.settings.timezone})")
+        logger.info(f"📅 Scheduler running ({s.timezone})")
+        logger.info(f"   Pre-Market:  {s.pre_market_hour:02d}:{s.pre_market_minute:02d} Mon-Fri")
+        logger.info(f"   Mid-Day:     {s.mid_market_hour:02d}:{s.mid_market_minute:02d} Mon-Fri")
+        logger.info(f"   Post-Market: {s.post_market_hour:02d}:{s.post_market_minute:02d} Mon-Fri")
         logger.info(
-            f"   Pre-market:  {self.settings.pre_market_hour:02d}:"
-            f"{self.settings.pre_market_minute:02d} Mon-Fri"
+            f"   Portfolio refresh: {s.portfolio_refresh_day.capitalize()} "
+            f"{s.portfolio_refresh_hour:02d}:{s.portfolio_refresh_minute:02d} ET"
         )
         logger.info(
-            f"   Post-market: {self.settings.post_market_hour:02d}:"
-            f"{self.settings.post_market_minute:02d} Mon-Fri"
+            f"   Auth via: {'Telegram' if s.telegram_enabled else 'terminal'}"
         )
         logger.info("Press Ctrl+C to stop.\n")
+
+        if self.notifier:
+            self.notifier.send_info(
+                f"🚀 Stock Monitor started\n"
+                f"Pre: {s.pre_market_hour:02d}:{s.pre_market_minute:02d} | "
+                f"Mid: {s.mid_market_hour:02d}:{s.mid_market_minute:02d} | "
+                f"Post: {s.post_market_hour:02d}:{s.post_market_minute:02d} ET\n"
+                f"Portfolio refresh: {s.portfolio_refresh_day.capitalize()} "
+                f"{s.portfolio_refresh_hour:02d}:{s.portfolio_refresh_minute:02d}"
+            )
 
         scheduler.start()
 
 
+# =============================================================================
+# Entry point
+# =============================================================================
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="E*TRADE Stock Monitor - AI-powered portfolio news & analysis"
+        description="E*TRADE Stock Monitor — AI-powered portfolio digest"
     )
     parser.add_argument(
         "--once",
         action="store_true",
-        help="Run a single report immediately and exit",
+        help="Run one report immediately and exit (default: pre_market)",
     )
     parser.add_argument(
         "--type",
-        choices=["pre_market", "post_market"],
+        choices=["pre_market", "mid_market", "post_market"],
         default="pre_market",
-        help="Report type when using --once (default: pre_market)",
+        help="Report type for --once (default: pre_market)",
+    )
+    parser.add_argument(
+        "--refresh-portfolio",
+        action="store_true",
+        help="Force re-auth with E*TRADE and refresh the portfolio cache, then run report",
+    )
+    parser.add_argument(
+        "--schedule",
+        action="store_true",
+        help="Start the scheduler (default when no other flags given)",
     )
     args = parser.parse_args()
 
     monitor = StockMonitor()
 
-    if args.once:
+    if args.refresh_portfolio:
+        # Always run a report after refreshing so we immediately get updated analysis
+        report_type = args.type if args.once else "pre_market"
+        logger.info("Force-refreshing portfolio from E*TRADE...")
+        monitor.run_report(report_type, force_portfolio_refresh=True)
+    elif args.once:
         monitor.run_report(args.type)
     else:
         monitor.start_scheduler()

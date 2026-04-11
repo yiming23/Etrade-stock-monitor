@@ -61,41 +61,33 @@ class PortfolioAnalysis:
 
 
 # --------------------------------------------------------------------------
-# Prompts
+# Prompts — one per report type
 # --------------------------------------------------------------------------
 
-PORTFOLIO_PROMPT = """\
-You are a seasoned buy-side portfolio manager with 20+ years of experience. \
-Analyze the news below and provide both article-level sentiment AND per-stock \
-trading recommendations for each holding.
+_PROMPT_BASE = """\
+You are a seasoned buy-side portfolio manager with 20+ years of experience.
 
 === PORTFOLIO HOLDINGS ===
 {positions_text}
 
-=== TOP NEWS ARTICLES ===
+=== NEWS ARTICLES ===
 {news_text}
 
-=== INSTRUCTIONS ===
-1. For each news article, provide a one-sentence impact summary and sentiment.
-2. For each stock in the portfolio, synthesize ALL relevant news (including macro) \
-into a single PM-level recommendation. Base your recommendation on:
-   - The news sentiment and likely market reaction
-   - The current price vs cost basis (unrealized gain/loss)
-   - Portfolio concentration risk
-   - Short-term technical tone (gap up/down, momentum, potential reversal)
-3. For MACRO news, fold geopolitical/economic risks into your per-stock analysis \
-where relevant (e.g., tariffs affecting tech supply chains, rate moves affecting growth stocks).
+{extra_context}
+=== FOCUS ===
+{focus_instructions}
 
+=== OUTPUT FORMAT ===
 Respond in this exact JSON format (no markdown, no extra text):
 {{
-  "overall_summary": "1-2 sentences: overall market environment and key risks/opportunities for this portfolio today",
-  "macro_note": "1 sentence: biggest macro tailwind or headwind relevant to these specific holdings",
+  "overall_summary": "{summary_instruction}",
+  "macro_note": "1 sentence: the single most important macro risk or tailwind for these holdings right now",
   "articles": [
     {{
       "rank": 1,
       "symbol": "TICKER or MACRO",
       "sentiment": "bullish" or "bearish" or "neutral",
-      "impact_summary": "One precise sentence: what this news means for the stock or market short-term"
+      "impact_summary": "One precise sentence on what this news means for the stock or market"
     }}
   ],
   "stock_calls": [
@@ -103,17 +95,55 @@ Respond in this exact JSON format (no markdown, no extra text):
       "symbol": "TICKER",
       "net_sentiment": "bullish" or "bearish" or "neutral",
       "estimated_move": "+1.5% to +3% today",
-      "trend_narrative": "Brief narrative: open direction, intraday pattern, key catalyst timing",
+      "trend_narrative": "{narrative_instruction}",
       "recommendation": "BUY" or "ADD" or "HOLD" or "TRIM" or "SELL",
-      "action_detail": "Specific advice: e.g. 'Hold full position. Support at $X. If breaks $Y, trim 25%.'",
+      "action_detail": "Specific advice referencing the holding's cost basis and current P&L",
       "stop_loss": "$000.00 or N/A",
       "price_target_short": "$000.00 (timeframe)"
     }}
   ]
 }}
 
-IMPORTANT: Include a stock_call entry for EVERY symbol in the portfolio holdings list.
+IMPORTANT: Include a stock_call for EVERY symbol in the portfolio holdings list.
 """
+
+# 8:30 AM — Pre-market: react to overnight news, set opening trade plan
+PRE_MARKET_FOCUS = """\
+This is the PRE-MARKET brief (8:30 AM ET). Market opens in 1 hour.
+1. Identify the key overnight / early-morning catalysts that will move stocks at open.
+2. For each stock: predict the opening gap direction and first-hour price action.
+3. Give actionable BUY/SELL/HOLD/TRIM calls specifically for the OPEN (first 30-60 min).
+4. Flag any earnings, economic data, or Fed speakers due TODAY that could cause intraday reversals."""
+
+PRE_MARKET_SUMMARY = "2 sentences: overall overnight sentiment and the #1 catalyst to watch at today's open"
+PRE_MARKET_NARRATIVE = "Opening gap direction, likely first-hour move, key intraday catalysts today"
+
+# 12:00 PM — Mid-day: summarize morning, update calls
+MID_MARKET_FOCUS = """\
+This is the MID-DAY brief (12:00 PM ET). Market has been open ~3.5 hours.
+1. Summarize what actually happened since the open — which morning calls were right/wrong.
+2. Update each position's recommendation based on morning price action and any new news.
+3. Flag any afternoon catalysts (Fed speakers, economic releases, earnings after-close).
+4. Identify positions that need attention (unusual volume, approaching stop levels, breakouts)."""
+
+MID_MARKET_SUMMARY = "2 sentences: how the morning session went and what changed from the pre-market thesis"
+MID_MARKET_NARRATIVE = "What happened this morning, updated stance for the afternoon session"
+
+# 4:30 PM — Post-market: look ahead to tomorrow and next week
+POST_MARKET_FOCUS = """\
+This is the POST-MARKET brief (4:30 PM ET). Market just closed.
+1. Summarize today's session and what it means for each position going forward.
+2. Look AHEAD: what are the key upcoming events for each holding in the next 1-2 weeks?
+   - Earnings dates (provided in extra context if available)
+   - Macro events: Fed meetings, CPI/PPI releases, jobs reports, GDP
+   - Geopolitical developments: trade war, tariff decisions, central bank decisions abroad, conflicts
+3. For any stock with upcoming earnings, give a pre-earnings recommendation:
+   - Should the user hold through earnings, trim beforehand, or add?
+   - Based on current setup (valuation, momentum, cost basis), what is the expected move?
+4. Rate each upcoming event as HIGH / MEDIUM / LOW impact for this specific portfolio."""
+
+POST_MARKET_SUMMARY = "2 sentences: today's session result and the single most important event to watch in the coming week"
+POST_MARKET_NARRATIVE = "Today's closing pattern + what to watch overnight and tomorrow morning"
 
 
 class StockAnalyzer:
@@ -169,6 +199,8 @@ class StockAnalyzer:
         self,
         top_articles: list[NewsArticle],
         positions: list,
+        report_type: str = "pre_market",
+        earnings_data: dict | None = None,
     ) -> PortfolioAnalysis:
         """
         Analyze top cross-portfolio articles + generate per-stock PM calls.
@@ -220,10 +252,39 @@ class StockAnalyzer:
             )
         news_text = "\n\n".join(news_lines)
 
-        prompt = PORTFOLIO_PROMPT.format(
-            n=len(top_articles),
+        # Select prompt components based on report type
+        if report_type == "mid_market":
+            focus = MID_MARKET_FOCUS
+            summary_instr = MID_MARKET_SUMMARY
+            narrative_instr = MID_MARKET_NARRATIVE
+        elif report_type == "post_market":
+            focus = POST_MARKET_FOCUS
+            summary_instr = POST_MARKET_SUMMARY
+            narrative_instr = POST_MARKET_NARRATIVE
+        else:  # pre_market (default)
+            focus = PRE_MARKET_FOCUS
+            summary_instr = PRE_MARKET_SUMMARY
+            narrative_instr = PRE_MARKET_NARRATIVE
+
+        # Build extra context block for post-market (earnings calendar)
+        extra_context = ""
+        if report_type == "post_market" and earnings_data:
+            lines = ["=== UPCOMING EARNINGS CALENDAR ==="]
+            for sym, cal in earnings_data.items():
+                lines.append(
+                    f"  {sym}: earnings on {cal.get('earnings_date', 'TBD')} | "
+                    f"EPS estimate: {cal.get('eps_estimate', 'N/A')} | "
+                    f"Revenue estimate: {cal.get('revenue_estimate', 'N/A')}"
+                )
+            extra_context = "\n".join(lines) + "\n\n"
+
+        prompt = _PROMPT_BASE.format(
             positions_text=positions_text,
             news_text=news_text,
+            extra_context=extra_context,
+            focus_instructions=focus,
+            summary_instruction=summary_instr,
+            narrative_instruction=narrative_instr,
         )
 
         try:

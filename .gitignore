@@ -33,8 +33,9 @@ htmlcov/
 logs/
 *.log
 
-# Token cache (sensitive!)
+# Token / portfolio cache (sensitive!)
 .etrade_token_cache.json
+.portfolio_cache.json
 gmail_token.json
 credentials.json
 token_cache/

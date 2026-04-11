@@ -29,6 +29,7 @@ pydantic-settings>=2.1.0
 # Utilities
 rich>=13.7.0
 loguru>=0.7.0
+backports.zoneinfo; python_version < "3.9"
 
 # Development
 pytest>=8.0.0

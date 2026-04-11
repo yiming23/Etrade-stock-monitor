@@ -15,7 +15,10 @@ from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
-from zoneinfo import ZoneInfo
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # Python < 3.9
+    from backports.zoneinfo import ZoneInfo
 
 from src.analysis.analyzer import ArticleAnalysis, PortfolioAnalysis, StockCall
 from src.etrade.portfolio import PortfolioSummary
@@ -163,7 +166,12 @@ class EmailSender:
     # =========================================================================
     def _build_subject(self, portfolio: PortfolioSummary, report_type: str) -> str:
         now = datetime.now(tz=ZoneInfo("America/New_York"))
-        label = "Pre-Market" if report_type == "pre_market" else "Post-Market"
+        if report_type == "pre_market":
+            label = "Pre-Market"
+        elif report_type == "mid_market":
+            label = "Mid-Day"
+        else:
+            label = "Post-Market"
         if self.settings.hide_account_value:
             # Show day change % instead of total value
             day_pct = (
@@ -182,8 +190,15 @@ class EmailSender:
         report_type: str,
     ) -> str:
         now = datetime.now(tz=ZoneInfo("America/New_York"))
-        label = "Pre-Market Brief" if report_type == "pre_market" else "Post-Market Summary"
-        icon = "&#127749;" if report_type == "pre_market" else "&#127761;"
+        if report_type == "pre_market":
+            label = "Pre-Market Brief"
+            icon = "&#127749;"   # sunrise
+        elif report_type == "mid_market":
+            label = "Mid-Day Update"
+            icon = "&#9728;"     # sun
+        else:
+            label = "Post-Market Summary"
+            icon = "&#127761;"   # sunset
 
         # Header value: dollar total OR percentage view (when hide_account_value=True)
         if self.settings.hide_account_value:

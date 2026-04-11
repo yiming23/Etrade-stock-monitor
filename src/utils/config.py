@@ -58,6 +58,30 @@ class Settings(BaseSettings):
     # Per-stock prices and P&L percentages are always shown regardless.
     hide_account_value: bool = True
 
+    # Schedule — midday report
+    mid_market_hour: int = 12
+    mid_market_minute: int = 0
+
+    # Portfolio cache + weekly re-auth schedule
+    # Day of week for the weekly E*TRADE re-auth (sun/mon/tue/..)
+    portfolio_refresh_day: str = "sun"
+    # Hour and minute for the weekly refresh (local ET time, 24h)
+    portfolio_refresh_hour: int = 12
+    portfolio_refresh_minute: int = 0
+    # Fallback: also re-auth if cache is older than this many days
+    # (catches missed Sundays, e.g. Mac was off). Set 0 to disable.
+    portfolio_cache_days: int = 8
+
+    # Telegram bot — for auth PIN delivery and error alerts.
+    # Set in .env — never hardcode here.
+    telegram_enabled: bool = False
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+    # Seconds to wait for the user to reply with PIN before sending a reminder.
+    telegram_auth_reminder_secs: int = 120
+    # Total seconds to wait before giving up on Telegram auth.
+    telegram_auth_timeout_secs: int = 300
+
     @property
     def etrade_base_url(self) -> str:
         if self.etrade_environment == "sandbox":
