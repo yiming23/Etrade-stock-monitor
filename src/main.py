@@ -419,11 +419,13 @@ def main() -> None:
     monitor = StockMonitor()
 
     if args.refresh_portfolio:
-        # Always run a report after refreshing so we immediately get updated analysis
         report_type = args.type if args.once else "pre_market"
         logger.info("Force-refreshing portfolio from E*TRADE...")
         monitor.run_report(report_type, force_portfolio_refresh=True)
     elif args.once:
+        # Start Telegram listener even in --once mode so commands work during testing
+        if monitor.notifier:
+            monitor.notifier.start_command_listener(monitor._handle_telegram_command)
         monitor.run_report(args.type)
     else:
         monitor.start_scheduler()

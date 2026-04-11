@@ -69,7 +69,8 @@ class TelegramNotifier:
 
     def _command_loop(self) -> None:
         """Daemon thread: poll for commands, pause while auth is in progress."""
-        self._sync_update_offset()   # skip messages sent before startup
+        # Don't skip existing messages on startup — user may have sent /auth
+        # before the process started (e.g. after a crash)
         while True:
             try:
                 # Yield to auth flow when it's waiting for a PIN
@@ -90,7 +91,7 @@ class TelegramNotifier:
                             daemon=True,
                         ).start()
             except Exception as e:
-                logger.debug(f"Telegram command loop error: {e}")
+                logger.warning(f"Telegram command loop error: {e}")
             time.sleep(3)
 
     def _safe_dispatch(self, command: str) -> None:
