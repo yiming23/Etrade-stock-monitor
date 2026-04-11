@@ -1,9 +1,14 @@
 """
-Telegram bot helper for auth PIN delivery and error alerts.
+Telegram bot helper for auth PIN delivery, error alerts, and command handling.
+
+Supported commands (send from Telegram anytime):
+  /auth    — trigger E*TRADE re-authorization immediately
+  /status  — show current portfolio cache info
+  /help    — list available commands
 
 Setup (one-time):
   1. Message @BotFather on Telegram → /newbot → follow prompts → copy token
-  2. Start a chat with your new bot (just send /start)
+  2. Start a chat with your new bot (send /start)
   3. Visit https://api.telegram.org/bot{TOKEN}/getUpdates → find "chat":{"id":...}
   4. Add to .env:
        TELEGRAM_ENABLED=true
@@ -14,7 +19,9 @@ Setup (one-time):
 from __future__ import annotations
 
 import re
+import threading
 import time
+from typing import Callable
 
 import requests
 
@@ -27,25 +34,77 @@ TELEGRAM_API = "https://api.telegram.org/bot{token}/{method}"
 
 class TelegramNotifier:
     """
-    Thin wrapper around Telegram Bot API.
+    Telegram Bot API wrapper.
 
-    Used for:
-      - Sending the E*TRADE auth URL and waiting for PIN reply
-      - Sending error/alert messages
-      - Sending info messages (auth success, report sent, etc.)
+    Architecture:
+      - A background daemon thread (_command_loop) always polls for messages.
+      - When auth is in progress, the loop pauses and the auth flow polls directly.
+      - Commands (/auth, /status, /help) are dispatched to a registered callback.
     """
 
     def __init__(self, bot_token: str, chat_id: str) -> None:
         self.token = bot_token
         self.chat_id = str(chat_id)
         self._last_update_id: int = 0
+        self._update_lock = threading.Lock()         # guards _last_update_id
+        self._auth_in_progress = threading.Event()  # pauses command loop during auth
+        self._command_callback: Callable[[str], None] | None = None
+        self._listener_thread: threading.Thread | None = None
+
+    # -------------------------------------------------------------------------
+    # Command listener (runs as daemon thread inside the scheduler process)
+    # -------------------------------------------------------------------------
+
+    def start_command_listener(self, callback: Callable[[str], None]) -> None:
+        """
+        Start a background thread that polls for Telegram commands.
+        callback(command_text) is called on the listener thread for each command.
+        """
+        self._command_callback = callback
+        self._listener_thread = threading.Thread(
+            target=self._command_loop, daemon=True, name="telegram-listener"
+        )
+        self._listener_thread.start()
+        logger.info("Telegram command listener started (/auth, /status, /help)")
+
+    def _command_loop(self) -> None:
+        """Daemon thread: poll for commands, pause while auth is in progress."""
+        self._sync_update_offset()   # skip messages sent before startup
+        while True:
+            try:
+                # Yield to auth flow when it's waiting for a PIN
+                if self._auth_in_progress.is_set():
+                    time.sleep(1)
+                    continue
+
+                updates = self._get_updates()
+                for update in updates:
+                    text = self._extract_text(update)
+                    if not text:
+                        continue
+                    if text.startswith("/") and self._command_callback:
+                        logger.info(f"Telegram command received: {text!r}")
+                        threading.Thread(
+                            target=self._safe_dispatch,
+                            args=(text.strip(),),
+                            daemon=True,
+                        ).start()
+            except Exception as e:
+                logger.debug(f"Telegram command loop error: {e}")
+            time.sleep(3)
+
+    def _safe_dispatch(self, command: str) -> None:
+        try:
+            self._command_callback(command)
+        except Exception as e:
+            logger.error(f"Telegram command handler error: {e}")
+            self.send_error("Command handler error", str(e))
 
     # -------------------------------------------------------------------------
     # Public interface
     # -------------------------------------------------------------------------
 
     def send_message(self, text: str, silent: bool = False) -> bool:
-        """Send a plain-text message. Returns True on success."""
         try:
             self._post("sendMessage", {
                 "chat_id": self.chat_id,
@@ -60,17 +119,15 @@ class TelegramNotifier:
 
     def send_auth_request(self, authorize_url: str) -> str | None:
         """
-        Send the E*TRADE auth URL and wait for the user to reply with a PIN.
-
+        Send the E*TRADE auth URL as a tappable button and wait for PIN reply.
+        Pauses the command listener loop while waiting to avoid update conflicts.
         Returns the PIN string, or None if timed out.
-        Sends a reminder halfway through the timeout window.
         """
         from src.utils.config import get_settings
         settings = get_settings()
         timeout = settings.telegram_auth_timeout_secs
         reminder_after = settings.telegram_auth_reminder_secs
 
-        # Send message with an inline button — buttons are always tappable
         try:
             self._post("sendMessage", {
                 "chat_id": self.chat_id,
@@ -89,66 +146,62 @@ class TelegramNotifier:
                 },
             })
         except Exception as e:
-            # Fallback: send URL as plain text (auto-linked by Telegram)
             logger.warning(f"Inline button failed ({e}), sending plain URL...")
             self.send_message(
                 f"🔐 <b>E*TRADE Authorization Needed</b>\n\n"
                 f"Open this link, log in, then reply with the PIN:\n"
                 f"{authorize_url}"
             )
+
         logger.info("Telegram: auth request sent. Waiting for PIN reply...")
 
-        pin = self._poll_for_pin(timeout=timeout, reminder_after=reminder_after,
-                                  reminder_text=(
-                                      "⏰ <b>Reminder:</b> E*TRADE PIN still needed.\n"
-                                      "Please reply with your verification code."
-                                  ))
+        # Pause the command listener so it doesn't consume the PIN message
+        self._auth_in_progress.set()
+        self._sync_update_offset()   # skip anything that arrived before auth prompt
+
+        try:
+            pin = self._poll_for_pin(
+                timeout=timeout,
+                reminder_after=reminder_after,
+                reminder_text=(
+                    "⏰ <b>Reminder:</b> E*TRADE PIN still needed.\n"
+                    "Please reply with your verification code.\n\n"
+                    "If you missed the button, send /auth to restart."
+                ),
+            )
+        finally:
+            self._auth_in_progress.clear()   # always resume command listener
+
         if pin:
-            self.send_message(f"✅ PIN received. Authenticating...")
+            self.send_message("✅ PIN received. Authenticating...")
         else:
             self.send_message(
-                "❌ No PIN received within the timeout window.\n"
-                "The scheduled report will be skipped.\n"
-                "Re-run manually to try again."
+                "❌ No PIN received within the timeout window.\n\n"
+                "Send <b>/auth</b> whenever you're ready to try again."
             )
 
         return pin
 
     def send_error(self, title: str, detail: str = "") -> None:
-        """Send an error alert."""
         body = f"⚠️ <b>{title}</b>"
         if detail:
             body += f"\n\n<code>{detail[:800]}</code>"
         self.send_message(body)
 
     def send_info(self, text: str) -> None:
-        """Send a silent info notification (no phone buzz)."""
         self.send_message(text, silent=True)
 
     # -------------------------------------------------------------------------
-    # Internal polling
+    # Internal polling helpers
     # -------------------------------------------------------------------------
 
-    def _poll_for_pin(
-        self,
-        timeout: int,
-        reminder_after: int,
-        reminder_text: str,
-    ) -> str | None:
-        """
-        Poll getUpdates every 3 seconds for a reply containing a PIN-like code.
-        A valid PIN is 3–10 alphanumeric characters (E*TRADE uses 5 chars).
-        """
-        self._sync_update_offset()  # skip any old pending messages
-
+    def _poll_for_pin(self, timeout: int, reminder_after: int,
+                      reminder_text: str) -> str | None:
         deadline = time.time() + timeout
         reminder_sent = False
-        poll_interval = 3
 
         while time.time() < deadline:
             remaining = deadline - time.time()
-
-            # Send reminder once
             if not reminder_sent and remaining < (timeout - reminder_after):
                 self.send_message(reminder_text)
                 reminder_sent = True
@@ -157,49 +210,51 @@ class TelegramNotifier:
             for update in updates:
                 text = self._extract_text(update)
                 if text and self._looks_like_pin(text):
-                    logger.info(f"Telegram: received PIN reply")
+                    logger.info("Telegram: PIN received")
                     return text.strip()
 
-            time.sleep(poll_interval)
+            time.sleep(3)
 
         return None
 
     def _sync_update_offset(self) -> None:
-        """Fast-forward the offset so we ignore any messages sent before now."""
+        """Skip all pending messages so we only react to new ones."""
         updates = self._get_updates(limit=100)
         if updates:
-            self._last_update_id = updates[-1]["update_id"] + 1
+            with self._update_lock:
+                self._last_update_id = updates[-1]["update_id"] + 1
 
     def _get_updates(self, limit: int = 10) -> list[dict]:
-        """Fetch new updates from Telegram, advancing the offset."""
         try:
+            with self._update_lock:
+                offset = self._last_update_id
             resp = self._post("getUpdates", {
-                "offset": self._last_update_id,
+                "offset": offset,
                 "limit": limit,
-                "timeout": 2,      # long-poll for 2s on Telegram's side
+                "timeout": 2,
                 "allowed_updates": ["message"],
             }, timeout=6)
             updates = resp.get("result", [])
             if updates:
-                self._last_update_id = updates[-1]["update_id"] + 1
+                with self._update_lock:
+                    self._last_update_id = updates[-1]["update_id"] + 1
             return updates
         except Exception as e:
             logger.debug(f"Telegram getUpdates error: {e}")
             return []
 
     def _extract_text(self, update: dict) -> str | None:
-        """Pull the message text from an update object."""
         msg = update.get("message", {})
-        # Only accept messages from our own chat
         if str(msg.get("chat", {}).get("id", "")) != self.chat_id:
             return None
         return msg.get("text", "").strip()
 
     @staticmethod
     def _looks_like_pin(text: str) -> bool:
-        """Heuristic: E*TRADE PINs are 3–10 uppercase alphanumeric chars."""
+        """E*TRADE PINs: 3–10 uppercase alphanumeric chars, not a slash command."""
         cleaned = text.strip().upper()
-        return bool(re.fullmatch(r"[A-Z0-9]{3,10}", cleaned))
+        return (not cleaned.startswith("/") and
+                bool(re.fullmatch(r"[A-Z0-9]{3,10}", cleaned)))
 
     def _post(self, method: str, data: dict, timeout: int = 10) -> dict:
         url = TELEGRAM_API.format(token=self.token, method=method)
@@ -212,13 +267,11 @@ class TelegramNotifier:
 
 
 def make_notifier(settings) -> TelegramNotifier | None:
-    """Return a TelegramNotifier if enabled, else None."""
     if not settings.telegram_enabled:
         return None
     if not settings.telegram_bot_token or not settings.telegram_chat_id:
         logger.warning(
-            "TELEGRAM_ENABLED=true but TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set. "
-            "Disabling Telegram."
+            "TELEGRAM_ENABLED=true but TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set."
         )
         return None
     return TelegramNotifier(settings.telegram_bot_token, settings.telegram_chat_id)

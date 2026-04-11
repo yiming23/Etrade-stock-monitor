@@ -21,6 +21,7 @@ CLI flags:
 import argparse
 import signal
 import sys
+import threading
 from datetime import datetime
 try:
     from zoneinfo import ZoneInfo
@@ -220,6 +221,59 @@ class StockMonitor:
     # Scheduler
     # -------------------------------------------------------------------------
 
+    # -------------------------------------------------------------------------
+    # Telegram command handler
+    # -------------------------------------------------------------------------
+
+    def _handle_telegram_command(self, command: str) -> None:
+        """Called on a background thread for each /command received via Telegram."""
+        cmd = command.lower().split()[0]
+
+        if cmd == "/auth":
+            self.notifier.send_message(
+                "🔄 <b>Starting E*TRADE re-authorization...</b>\n"
+                "The new token will be cached until next Sunday."
+            )
+            self.refresh_portfolio_cache()
+
+        elif cmd == "/status":
+            from src.etrade.portfolio import load_portfolio_from_cache, PORTFOLIO_CACHE_FILE
+            import json
+            if PORTFOLIO_CACHE_FILE.exists():
+                try:
+                    data = json.loads(PORTFOLIO_CACHE_FILE.read_text())
+                    cached_at = data.get("cached_at", "unknown")[:19].replace("T", " ")
+                    positions = data.get("positions", [])
+                    symbols = ", ".join(p["symbol"] for p in positions)
+                    self.notifier.send_message(
+                        f"📊 <b>Portfolio Cache Status</b>\n\n"
+                        f"Last updated: {cached_at} UTC\n"
+                        f"Positions ({len(positions)}): {symbols}\n\n"
+                        f"Send /auth to force a refresh."
+                    )
+                except Exception as e:
+                    self.notifier.send_error("Could not read portfolio cache", str(e))
+            else:
+                self.notifier.send_message(
+                    "⚠️ No portfolio cache found.\nSend /auth to authenticate with E*TRADE."
+                )
+
+        elif cmd == "/help":
+            self.notifier.send_message(
+                "📋 <b>Available commands</b>\n\n"
+                "/auth — Re-authorize E*TRADE immediately\n"
+                "          (use if Sunday auth timed out)\n\n"
+                "/status — Show portfolio cache info\n"
+                "          (last refresh time + holdings)\n\n"
+                "/help — Show this message"
+            )
+
+        else:
+            self.notifier.send_message(
+                f"Unknown command: <code>{command}</code>\n"
+                "Send /help for available commands."
+            )
+
     def refresh_portfolio_cache(self) -> None:
         """
         Weekly job: re-auth with E*TRADE, update the portfolio cache.
@@ -313,6 +367,10 @@ class StockMonitor:
             f"   Auth via: {'Telegram' if s.telegram_enabled else 'terminal'}"
         )
         logger.info("Press Ctrl+C to stop.\n")
+
+        # Start Telegram command listener (runs on a daemon thread)
+        if self.notifier:
+            self.notifier.start_command_listener(self._handle_telegram_command)
 
         if self.notifier:
             self.notifier.send_info(
