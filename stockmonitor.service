@@ -1,0 +1,17 @@
+[Unit]
+Description=E*TRADE Stock Monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/Etrade-stock-monitor
+ExecStart=/home/ubuntu/Etrade-stock-monitor/.venv/bin/python -m src.main
+Restart=always
+RestartSec=30
+StandardOutput=append:/home/ubuntu/Etrade-stock-monitor/logs/service.log
+StandardError=append:/home/ubuntu/Etrade-stock-monitor/logs/service.log
+
+[Install]
+WantedBy=multi-user.target
