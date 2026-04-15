@@ -39,3 +39,6 @@ logs/
 gmail_token.json
 credentials.json
 token_cache/
+
+# Prediction tracking database (personal data)
+data/predictions.db

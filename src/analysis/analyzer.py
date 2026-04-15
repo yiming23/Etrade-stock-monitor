@@ -46,6 +46,9 @@ class StockCall:
     action_detail: str          # specific advice: position size, entry, rationale
     stop_loss: str              # e.g. "$145.00" or "N/A"
     price_target_short: str     # e.g. "$162.00 (1-week)"
+    # Structured prediction fields (used by backtest tracker)
+    predicted_direction: str = "flat"       # "up" | "down" | "flat"
+    predicted_magnitude_pct: float = 0.0   # midpoint of expected % move
     current_price: float = 0.0
     cost_basis: float = 0.0
     unrealized_pct: float = 0.0
@@ -94,6 +97,8 @@ Respond in this exact JSON format (no markdown, no extra text):
     {{
       "symbol": "TICKER",
       "net_sentiment": "bullish" or "bearish" or "neutral",
+      "predicted_direction": "up" or "down" or "flat",
+      "predicted_magnitude_pct": 2.5,
       "estimated_move": "+1.5% to +3% today",
       "trend_narrative": "{narrative_instruction}",
       "recommendation": "BUY" or "ADD" or "HOLD" or "TRIM" or "SELL",
@@ -495,6 +500,15 @@ class StockAnalyzer:
                 cost = cost_map.get(sym, 0)
                 unrealized_pct = ((current - cost) / cost * 100) if cost else 0
 
+                # Parse structured prediction fields
+                pred_dir = item.get("predicted_direction", "flat").lower()
+                if pred_dir not in ("up", "down", "flat"):
+                    pred_dir = "flat"
+                try:
+                    pred_mag = float(item.get("predicted_magnitude_pct", 0) or 0)
+                except (TypeError, ValueError):
+                    pred_mag = 0.0
+
                 stock_calls.append(StockCall(
                     symbol=sym,
                     net_sentiment=item.get("net_sentiment", "neutral"),
@@ -504,6 +518,8 @@ class StockAnalyzer:
                     action_detail=item.get("action_detail", ""),
                     stop_loss=item.get("stop_loss", "N/A"),
                     price_target_short=item.get("price_target_short", "N/A"),
+                    predicted_direction=pred_dir,
+                    predicted_magnitude_pct=pred_mag,
                     current_price=current,
                     cost_basis=cost,
                     unrealized_pct=unrealized_pct,

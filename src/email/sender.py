@@ -81,9 +81,13 @@ class EmailSender:
         portfolio: PortfolioSummary,
         analysis: PortfolioAnalysis,
         report_type: str = "pre_market",
+        accuracy_map: dict | None = None,
     ) -> bool:
         subject = self._build_subject(portfolio, report_type)
-        html_body = self._build_html(portfolio, analysis, report_type)
+        html_body = self._build_html(
+            portfolio, analysis, report_type,
+            accuracy_map=accuracy_map or {},
+        )
 
         if self.backend == "gmail_api":
             return self._send_via_gmail_api(subject, html_body)
@@ -188,6 +192,7 @@ class EmailSender:
         portfolio: PortfolioSummary,
         analysis: PortfolioAnalysis,
         report_type: str,
+        accuracy_map: dict | None = None,
     ) -> str:
         now = datetime.now(tz=ZoneInfo("America/New_York"))
         if report_type == "pre_market":
@@ -241,7 +246,10 @@ class EmailSender:
       </p>"""
 
         news_rows = self._build_news_rows(analysis.articles)
-        stock_call_rows = self._build_stock_call_rows(analysis.stock_calls)
+        stock_call_rows = self._build_stock_call_rows(
+            analysis.stock_calls,
+            accuracy_map=accuracy_map or {},
+        )
         positions_header = self._build_positions_table_header()
         positions_rows = self._build_positions_rows(portfolio)
 
@@ -446,10 +454,15 @@ class EmailSender:
 
         return "\n".join(rows)
 
-    def _build_stock_call_rows(self, calls: list[StockCall]) -> str:
+    def _build_stock_call_rows(
+        self,
+        calls: list[StockCall],
+        accuracy_map: dict | None = None,
+    ) -> str:
         if not calls:
             return ""
 
+        accuracy_map = accuracy_map or {}
         rows = []
         for call in calls:
             rec = call.recommendation.upper()
@@ -471,6 +484,25 @@ class EmailSender:
             cost_str = f"${call.cost_basis:.2f}" if call.cost_basis else "N/A"
             price_str = f"${call.current_price:.2f}" if call.current_price else "N/A"
 
+            # Historical accuracy badge (only shown when we have enough samples)
+            acc_badge = ""
+            if call.symbol in accuracy_map:
+                v = accuracy_map[call.symbol]
+                acc = v["accuracy"]
+                correct, total = v["correct"], v["total"]
+                if acc >= 0.65:
+                    acc_color, acc_icon = "#16a34a", "&#9989;"    # green ✅
+                elif acc >= 0.50:
+                    acc_color, acc_icon = "#d97706", "&#128993;"  # amber 🟡
+                else:
+                    acc_color, acc_icon = "#dc2626", "&#10060;"   # red ❌
+                acc_badge = (
+                    f'<span title="Historical direction accuracy: {correct}/{total} calls" '
+                    f'style="font-size:11px;color:{acc_color};font-weight:600;'
+                    f'margin-left:8px;white-space:nowrap;">'
+                    f'{acc_icon} {acc:.0%} ({total})</span>'
+                )
+
             rows.append(f"""\
 <tr>
   <td class="news-td" style="padding:12px 20px;border-bottom:1px solid #f1f5f9;">
@@ -487,6 +519,7 @@ class EmailSender:
                   {price_str} &bull; cost {cost_str} &bull;
                   <span style="color:{pl_color};font-weight:600;">{pl_text}</span>
                 </span>
+                {acc_badge}
               </td>
               <td style="vertical-align:middle;text-align:right;white-space:nowrap;">
                 <span class="rec-badge" style="display:inline-block;

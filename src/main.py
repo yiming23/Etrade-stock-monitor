@@ -19,10 +19,11 @@ CLI flags:
 """
 
 import argparse
+import logging
 import signal
 import sys
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 try:
     from zoneinfo import ZoneInfo
 except ImportError:  # Python < 3.9
@@ -30,6 +31,9 @@ except ImportError:  # Python < 3.9
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.events import (
+    EVENT_JOB_EXECUTED, EVENT_JOB_ERROR, EVENT_JOB_MISSED,
+)
 
 from src.etrade.auth import ETradeAuth
 from src.etrade.portfolio import (
@@ -44,8 +48,34 @@ from src.email.sender import EmailSender
 from src.utils.config import get_settings
 from src.utils.logger import get_logger
 from src.utils.telegram_bot import make_notifier
+from src.backtest.storage import PredictionDB
+from src.backtest.engine import run_backtest
+from src.backtest.report import save_report as save_backtest_report
 
 logger = get_logger(__name__)
+
+# ---------------------------------------------------------------------------
+# Bridge Python stdlib logging → loguru so APScheduler errors appear in logs
+# ---------------------------------------------------------------------------
+class _LoguruHandler(logging.Handler):
+    """Redirect stdlib logging records into loguru."""
+    _level_map = {
+        logging.DEBUG:    "DEBUG",
+        logging.INFO:     "INFO",
+        logging.WARNING:  "WARNING",
+        logging.ERROR:    "ERROR",
+        logging.CRITICAL: "CRITICAL",
+    }
+    def emit(self, record: logging.LogRecord) -> None:
+        lvl = self._level_map.get(record.levelno, "DEBUG")
+        from loguru import logger as _loguru
+        _loguru.opt(depth=6, exception=record.exc_info).log(
+            lvl, record.getMessage()
+        )
+
+_handler = _LoguruHandler()
+logging.getLogger("apscheduler").addHandler(_handler)
+logging.getLogger("apscheduler").setLevel(logging.DEBUG)
 
 
 class StockMonitor:
@@ -127,6 +157,19 @@ class StockMonitor:
             return None
 
     # -------------------------------------------------------------------------
+    # Helpers
+    # -------------------------------------------------------------------------
+
+    @staticmethod
+    def _last_trading_day(from_date) -> "date":
+        """Return the most recent weekday before from_date (skips weekends)."""
+        from datetime import date as _date, timedelta
+        d = from_date - timedelta(days=1)
+        while d.weekday() >= 5:   # 5=Saturday, 6=Sunday
+            d -= timedelta(days=1)
+        return d
+
+    # -------------------------------------------------------------------------
     # Report runner
     # -------------------------------------------------------------------------
 
@@ -134,7 +177,15 @@ class StockMonitor:
         self,
         report_type: str = "pre_market",
         force_portfolio_refresh: bool = False,
+        dry_run: bool = False,
     ) -> None:
+        """
+        Run a full report pipeline.
+
+        dry_run=True: runs every step and sends the email, but does NOT write
+        predictions or actuals to the backtest database.  Use this when
+        testing so you don't pollute historical accuracy data.
+        """
         tz = ZoneInfo(self.settings.timezone)
         now = datetime.now(tz)
         label_map = {
@@ -143,13 +194,14 @@ class StockMonitor:
             "post_market": "Post-Market",
         }
         label = label_map.get(report_type, report_type)
+        dry_tag = "  [DRY RUN — DB not written]" if dry_run else ""
 
         logger.info("=" * 60)
-        logger.info(f"Running {label} report — {now.strftime('%Y-%m-%d %H:%M %Z')}")
+        logger.info(f"Running {label} report — {now.strftime('%Y-%m-%d %H:%M %Z')}{dry_tag}")
         logger.info("=" * 60)
 
         # Step 1: Portfolio
-        logger.info("[1/5] Loading portfolio...")
+        logger.info("[1/6] Loading portfolio...")
         portfolio = self._get_portfolio(force_refresh=force_portfolio_refresh)
         if not portfolio or not portfolio.positions:
             msg = "No portfolio positions available. Skipping report."
@@ -166,14 +218,14 @@ class StockMonitor:
         )
 
         # Step 2: Fetch news
-        logger.info("[2/5] Fetching news...")
+        logger.info("[2/6] Fetching news...")
         news_by_symbol = self.news_scraper.fetch_all_news(unique_symbols)
         total_news = sum(len(v) for v in news_by_symbol.values())
         logger.info(f"  {total_news} articles fetched")
 
         # Step 3: Rank news
         top_n = self.settings.top_news_count
-        logger.info(f"[3/5] Selecting top {top_n} cross-portfolio articles...")
+        logger.info(f"[3/6] Selecting top {top_n} cross-portfolio articles...")
         top_articles = self.news_scraper.select_top_portfolio_news(
             news_by_symbol, portfolio.positions, top_n=top_n
         )
@@ -181,7 +233,7 @@ class StockMonitor:
         # Step 4: Fetch earnings calendar for post-market
         earnings_data = {}
         if report_type == "post_market":
-            logger.info("[4/5] Fetching earnings calendar...")
+            logger.info("[4/6] Fetching earnings calendar...")
             earnings_data = fetch_earnings_calendar(unique_symbols)
             if earnings_data:
                 upcoming = ", ".join(
@@ -190,10 +242,10 @@ class StockMonitor:
                 )
                 logger.info(f"  Upcoming earnings: {upcoming}")
         else:
-            logger.info("[4/5] Skipping earnings calendar (pre/mid-market)")
+            logger.info("[4/6] Skipping earnings calendar (pre/mid-market)")
 
         # Step 5: AI analysis
-        logger.info(f"[5/5] Running {label} AI analysis...")
+        logger.info(f"[5/6] Running {label} AI analysis...")
         analysis = self.analyzer.analyze_top_news(
             top_articles,
             portfolio.positions,
@@ -201,21 +253,51 @@ class StockMonitor:
             earnings_data=earnings_data,
         )
 
-        # Step 6: Send email
+        # Step 6: Send email — include per-stock accuracy summary from backtest DB
         logger.info("[6/6] Sending email...")
-        success = self.email_sender.send_report(portfolio, analysis, report_type)
+        accuracy_map = {}
+        if not dry_run:
+            try:
+                db = PredictionDB()
+                accuracy_map = db.get_accuracy_summary(unique_symbols)
+            except Exception as e:
+                logger.debug(f"Could not load accuracy summary: {e}")
+
+        success = self.email_sender.send_report(
+            portfolio, analysis, report_type,
+            accuracy_map=accuracy_map,
+        )
 
         if success:
-            logger.info(f"✅ {label} report sent.")
+            logger.info(f"✅ {label} report sent.{dry_tag}")
             if self.notifier:
-                # Silent confirmation — no buzz
                 self.notifier.send_info(
-                    f"📧 {label} report sent at {now.strftime('%H:%M ET')}"
+                    f"📧 {label} report sent at {now.strftime('%H:%M ET')}{dry_tag}"
                 )
         else:
             logger.error(f"❌ Failed to send {label} report.")
             if self.notifier:
                 self.notifier.send_error(f"{label} email failed", "Check logs.")
+
+        # ── Backtest tracking (skipped in dry-run) ─────────────────────────
+        if dry_run:
+            logger.info("DRY RUN: skipping backtest DB writes.")
+            return
+
+        db = PredictionDB()
+        trade_date = now.date()
+
+        # Save LLM predictions for today (all report types, pre-market is primary)
+        if analysis.stock_calls:
+            db.save_predictions(trade_date, analysis.stock_calls, report_type)
+
+        # Pre-market: fetch YESTERDAY's actuals (previous trading day).
+        # This is done at pre-market because it's the most reliably-run job,
+        # and yesterday's market has definitely closed by 8:30 AM.
+        if report_type == "pre_market" and unique_symbols:
+            prev_date = self._last_trading_day(trade_date)
+            logger.info(f"Fetching actuals for previous trading day ({prev_date})...")
+            db.save_actuals(prev_date, unique_symbols)
 
     # -------------------------------------------------------------------------
     # Scheduler
@@ -309,12 +391,77 @@ class StockMonitor:
             if self.notifier:
                 self.notifier.send_error("Weekly portfolio refresh failed", str(e))
 
+    def _run_catchup_if_missed(self) -> None:
+        """
+        On startup, check if the most recent scheduled report was missed
+        (e.g. Mac was asleep at 8:30 AM). If so, run it now — but only if
+        we're still within a 2-hour catch-up window after the scheduled time.
+        """
+        tz = ZoneInfo(self.settings.timezone)
+        s = self.settings
+        now = datetime.now(tz)
+
+        # Only attempt on weekdays
+        if now.weekday() >= 5:  # Sat=5, Sun=6
+            return
+
+        schedule_slots = [
+            (s.pre_market_hour,  s.pre_market_minute,  "pre_market"),
+            (s.mid_market_hour,  s.mid_market_minute,  "mid_market"),
+            (s.post_market_hour, s.post_market_minute, "post_market"),
+        ]
+
+        CATCHUP_WINDOW = timedelta(hours=2)
+
+        for hour, minute, rtype in schedule_slots:
+            scheduled = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            delta = now - scheduled
+            if timedelta(0) < delta < CATCHUP_WINDOW:
+                logger.warning(
+                    f"⏰ Catch-up: {rtype} was scheduled {int(delta.total_seconds() / 60)}m ago "
+                    f"(Mac likely slept). Running now..."
+                )
+                if self.notifier:
+                    self.notifier.send_info(
+                        f"⏰ Catch-up: {rtype.replace('_', '-')} report missed "
+                        f"(+{int(delta.total_seconds() / 60)}m). Sending now..."
+                    )
+                try:
+                    self.run_report(rtype)
+                except Exception as e:
+                    logger.error(f"Catch-up report failed: {e}")
+                break  # only catch up the most recent missed slot
+
     def start_scheduler(self) -> None:
         tz = ZoneInfo(self.settings.timezone)
         scheduler = BlockingScheduler(timezone=tz)
         s = self.settings
 
+        # ── APScheduler event listener (logs missed/error/executed via loguru) ──
+        def _on_job_event(event):
+            if event.exception:
+                logger.error(
+                    f"❌ Job '{event.job_id}' raised an exception: {event.exception}"
+                )
+            elif hasattr(event, "scheduled_run_time"):
+                # missed event
+                logger.warning(
+                    f"⚠️  Job '{event.job_id}' MISSED — scheduled for "
+                    f"{event.scheduled_run_time.strftime('%Y-%m-%d %H:%M %Z')}. "
+                    f"Mac was likely asleep past the grace window."
+                )
+            else:
+                logger.debug(f"✅ Job '{event.job_id}' executed successfully.")
+
+        scheduler.add_listener(
+            _on_job_event,
+            EVENT_JOB_EXECUTED | EVENT_JOB_ERROR | EVENT_JOB_MISSED,
+        )
+
         # ── Weekday report jobs ──────────────────────────────────────────────
+        # misfire_grace_time=7200 (2 hours): if Mac was asleep at 8:30 but wakes
+        # by 10:30, the report still fires.  Coalesce=True means only ONE run
+        # even if multiple slots were missed while asleep.
         report_jobs = [
             (s.pre_market_hour,  s.pre_market_minute,  "pre_market",  "Pre-Market"),
             (s.mid_market_hour,  s.mid_market_minute,  "mid_market",  "Mid-Day"),
@@ -330,7 +477,8 @@ class StockMonitor:
                 args=[rtype],
                 id=f"{rtype}_report",
                 name=f"{name} Report",
-                misfire_grace_time=600,
+                misfire_grace_time=7200,   # 2-hour grace (was 600s / 10 min)
+                coalesce=True,
             )
 
         # ── Weekly portfolio refresh (Sunday noon by default) ────────────────
@@ -344,7 +492,8 @@ class StockMonitor:
             ),
             id="weekly_portfolio_refresh",
             name="Weekly Portfolio Refresh",
-            misfire_grace_time=3600,   # 1-hour grace — fires even if Mac was asleep
+            misfire_grace_time=14400,   # 4-hour grace for weekly refresh
+            coalesce=True,
         )
 
         def shutdown(signum, frame):
@@ -366,11 +515,15 @@ class StockMonitor:
         logger.info(
             f"   Auth via: {'Telegram' if s.telegram_enabled else 'terminal'}"
         )
+        logger.info(f"   Misfire grace: 2h (reports), 4h (portfolio refresh)")
         logger.info("Press Ctrl+C to stop.\n")
 
         # Start Telegram command listener (runs on a daemon thread)
         if self.notifier:
             self.notifier.start_command_listener(self._handle_telegram_command)
+
+        # Run catch-up for any report missed while Mac was asleep
+        self._run_catchup_if_missed()
 
         if self.notifier:
             self.notifier.send_info(
@@ -414,11 +567,67 @@ def main() -> None:
         action="store_true",
         help="Start the scheduler (default when no other flags given)",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Run full pipeline and send email but do NOT write to the backtest DB",
+    )
+    parser.add_argument(
+        "--backtest",
+        action="store_true",
+        help="Run backtest report comparing LLM predictions vs actual prices",
+    )
+    parser.add_argument(
+        "--backtest-symbol",
+        metavar="TICKER",
+        default=None,
+        help="Filter backtest to a single symbol (e.g. --backtest-symbol AAPL)",
+    )
+    parser.add_argument(
+        "--backtest-since",
+        metavar="YYYY-MM-DD",
+        default=None,
+        help="Only include predictions since this date",
+    )
+    parser.add_argument(
+        "--fetch-actuals",
+        metavar="YYYY-MM-DD",
+        default=None,
+        help="Manually fetch EOD actuals for a given date (e.g. --fetch-actuals 2026-04-11)",
+    )
     args = parser.parse_args()
 
     monitor = StockMonitor()
 
-    if args.refresh_portfolio:
+    if args.backtest:
+        from datetime import date as _date
+        since = _date.fromisoformat(args.backtest_since) if args.backtest_since else None
+        db = PredictionDB()
+        rows = db.get_backtest_rows(
+            report_type=args.type,
+            symbol=args.backtest_symbol,
+            since=since,
+        )
+        from src.backtest.engine import _compute_summary
+        summary = _compute_summary(rows) if rows else {}
+        # Print to terminal
+        run_backtest(report_type=args.type, symbol=args.backtest_symbol, since=since)
+        # Also save to file
+        if rows:
+            path = save_backtest_report(rows, summary, args.type)
+            print(f"\n📄 Report saved → {path}\n")
+    elif args.fetch_actuals:
+        from datetime import date as _date
+        target = _date.fromisoformat(args.fetch_actuals)
+        db = PredictionDB()
+        symbols = db.get_symbols_for_date(target)
+        if not symbols:
+            print(f"No predictions found for {args.fetch_actuals}. Run a report first.")
+        else:
+            print(f"Fetching actuals for {len(symbols)} symbols on {args.fetch_actuals}...")
+            db.save_actuals(target, symbols)
+            print("Done.")
+    elif args.refresh_portfolio:
         report_type = args.type if args.once else "pre_market"
         logger.info("Force-refreshing portfolio from E*TRADE...")
         monitor.run_report(report_type, force_portfolio_refresh=True)
@@ -426,7 +635,7 @@ def main() -> None:
         # Start Telegram listener even in --once mode so commands work during testing
         if monitor.notifier:
             monitor.notifier.start_command_listener(monitor._handle_telegram_command)
-        monitor.run_report(args.type)
+        monitor.run_report(args.type, dry_run=args.dry_run)
     else:
         monitor.start_scheduler()
 
