@@ -39,3 +39,7 @@ black>=24.0.0
 ruff>=0.2.0
 mypy>=1.8.0
 pre-commit>=3.6.0
+
+# Quant research
+pyarrow>=15.0.0
+scipy>=1.12.0
