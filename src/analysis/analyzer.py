@@ -72,6 +72,8 @@ You are a seasoned buy-side portfolio manager with 20+ years of experience.
 You have access to both systematic quant signals (medium-term, 1–4 weeks) and today's news.
 Your job is to synthesize both when forming recommendations — not treat them separately.
 
+Today's date: {today}
+
 === PORTFOLIO HOLDINGS ===
 {positions_text}
 
@@ -325,6 +327,7 @@ class StockAnalyzer:
             extra_context = "\n".join(lines) + "\n\n"
 
         prompt = _PROMPT_BASE.format(
+            today=date.today().strftime("%A, %B %d, %Y"),
             positions_text=positions_text,
             quant_context=quant_context,
             news_text=news_text,

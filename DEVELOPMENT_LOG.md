@@ -45,12 +45,19 @@
 - Deploy workflow: edit on Mac → `git push` → `git pull && ./restart_server.sh` on server
 - Credentials (`.env`, `credentials.json`, `gmail_token.json`) copied via `scp`, never in git
 
-### [2026-04-15] Wired QuantForecaster into daily report pipeline
-- `main.py`: Added step 5b — runs `QuantForecaster.forecast()` on all portfolio positions after LLM step
-- `email/sender.py`: Added quant block per stock (light-blue panel, "Quant (medium-term)" label)
-  - Shows direction arrow, estimated move %, recommendation badge, confidence level, narrative
-  - LLM row now labeled "LLM:" to distinguish short-term (news) vs medium-term (signals)
-- Quant is fully non-fatal: if signals fail, email still sends with LLM results only
+### [2026-04-16] Quant + LLM integration into daily report
+- Quant runs first (step 5a), LLM runs second (step 5b) with quant signals as context
+- LLM prompt now includes a `=== QUANT SIGNALS ===` section — LLM acts as PM synthesizing both news and medium-term factor signals
+- Email layout: quant panel on top (reference), LLM recommendation below (incorporates quant in action_detail)
+- LLM prompt includes today's date to fix incorrect earnings countdown calculations
+- Fixed ETF 404 noise: `data/fetcher.py` now skips fundamentals calls for known ETFs (GLD, QQQ, VOO, etc.) and suppresses yfinance stderr output
+- Fixed Wikipedia 403: `src/universe/sp500.py` now uses `requests` with a browser User-Agent instead of `pd.read_html()` directly
+- Added `data/market_cache/` to `.gitignore` — rebuilt automatically by yfinance on first run
+
+### [2026-04-16] IC analysis & walk-forward validation (local research run)
+- Ran `--ic-analysis` on 503 S&P 500 stocks (2y history) → `data/ic_results.json`
+- Ran `--walk-forward` OOS validation (train 12m, test 1m, roll forward)
+- Updated `quant_model.json` to v1.1 with OOS-validated weights (see Quant Model section)
 
 ### [2026-04-16] Quant forecasting system (scaffolding complete)
 - Built `src/universe/sp500.py` — S&P 500 universe with sector → ETF mapping, weekly cached
@@ -115,18 +122,17 @@
 | volume_surge | 3 | 0.01 | Gervais et al (2001) |
 
 **Next steps for model iteration**
-- [ ] Run `--ic-analysis` on S&P 500 to get actual IC for each signal
-- [ ] Run `--walk-forward` for OOS validation
-- [ ] Update weights from IC results (`quant_model.json`)
-- [ ] Wire into daily report email
+- [x] Run `--ic-analysis` on S&P 500 to get actual IC for each signal
+- [x] Run `--walk-forward` for OOS validation
+- [x] Update weights from IC results (`quant_model.json`)
+- [x] Wire into daily report email
 - [ ] After 3-6 months live: replace linear weights with Ridge/Logistic regression
 
 ---
 
 ## Next Up
 
-- [ ] Run `--ic-analysis` on S&P 500 to validate signals with real historical data
-- [ ] Run `--walk-forward` OOS validation, update `quant_model.json` weights
 - [ ] Weekly screener run → email top 5 S&P 500 opportunities
 - [ ] Accumulate live backtest data (LLM + quant predictions vs actuals)
 - [ ] Phase 2 model: Ridge/Logistic regression once 3-6 months of data exists
+- [ ] Re-run `--ic-analysis` + `--walk-forward` every 1-2 months to refresh weights
