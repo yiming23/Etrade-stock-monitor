@@ -1,0 +1,112 @@
+{
+  "run_date": "2026-04-15",
+  "universe_size": 503,
+  "forward_periods": [
+    5,
+    21
+  ],
+  "by_signal": {
+    "momentum_12m_1m": {
+      "ic_5d": 0.1461,
+      "ic_ir_5d": 0.365,
+      "p_value_5d": 0.0009,
+      "observations": 517,
+      "ic_21d": 0.2119,
+      "ic_ir_21d": 0.552,
+      "p_value_21d": 0.0
+    },
+    "iv_rank": {
+      "ic_5d": 0.0578,
+      "ic_ir_5d": 0.143,
+      "p_value_5d": 0.2239,
+      "observations": 444,
+      "ic_21d": 0.1449,
+      "ic_ir_21d": 0.44,
+      "p_value_21d": 0.0022
+    },
+    "iv_skew": {
+      "ic_5d": 0.0412,
+      "ic_ir_5d": 0.126,
+      "p_value_5d": 0.3868,
+      "observations": 444,
+      "ic_21d": -0.0191,
+      "ic_ir_21d": -0.108,
+      "p_value_21d": 0.6878
+    },
+    "sue": {
+      "ic_5d": 0.0941,
+      "ic_ir_5d": 0.092,
+      "p_value_5d": 0.0475,
+      "observations": 444,
+      "ic_21d": 0.2164,
+      "ic_ir_21d": 0.499,
+      "p_value_21d": 0.0
+    },
+    "analyst_revision": {
+      "ic_5d": 0.0557,
+      "ic_ir_5d": 0.174,
+      "p_value_5d": 0.2061,
+      "observations": 517,
+      "ic_21d": 0.0908,
+      "ic_ir_21d": 0.251,
+      "p_value_21d": 0.039
+    },
+    "put_call_ratio": {
+      "ic_5d": 0.0186,
+      "ic_ir_5d": -0.074,
+      "p_value_5d": 0.6956,
+      "observations": 444,
+      "ic_21d": -0.011,
+      "ic_ir_21d": -0.108,
+      "p_value_21d": 0.8173
+    },
+    "momentum_1m": {
+      "ic_5d": 0.072,
+      "ic_ir_5d": 0.214,
+      "p_value_5d": 0.1019,
+      "observations": 517,
+      "ic_21d": 0.102,
+      "ic_ir_21d": 0.257,
+      "p_value_21d": 0.0203
+    },
+    "volume_surge": {
+      "ic_5d": -0.0666,
+      "ic_ir_5d": -0.399,
+      "p_value_5d": 0.1305,
+      "observations": 517,
+      "ic_21d": -0.0897,
+      "ic_ir_21d": -0.391,
+      "p_value_21d": 0.0415
+    },
+    "short_interest": {
+      "ic_5d": 0.048,
+      "ic_ir_5d": 0.215,
+      "p_value_5d": 0.2762,
+      "observations": 517,
+      "ic_21d": 0.0515,
+      "ic_ir_21d": 0.046,
+      "p_value_21d": 0.2425
+    },
+    "rel_strength": {
+      "ic_5d": 0.0889,
+      "ic_ir_5d": 0.446,
+      "p_value_5d": 0.0434,
+      "observations": 517,
+      "ic_21d": 0.1177,
+      "ic_ir_21d": 0.281,
+      "p_value_21d": 0.0074
+    }
+  },
+  "recommended_weights": {
+    "momentum_12m_1m": 0.2266,
+    "iv_rank": 0.1549,
+    "iv_skew": 0.0,
+    "sue": 0.2314,
+    "analyst_revision": 0.0971,
+    "put_call_ratio": 0.0,
+    "momentum_1m": 0.1091,
+    "volume_surge": 0.0,
+    "short_interest": 0.0551,
+    "rel_strength": 0.1259
+  }
+}
