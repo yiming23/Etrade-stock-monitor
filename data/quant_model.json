@@ -1,0 +1,17 @@
+{
+  "version": "v1.0-prior",
+  "updated_at": "2026-04-15",
+  "weights": {
+    "analyst_revision": 0.22,
+    "sue": 0.2,
+    "momentum_12m_1m": 0.18,
+    "rel_strength": 0.12,
+    "insider_net": 0.1,
+    "short_interest": 0.08,
+    "put_call_ratio": 0.04,
+    "iv_skew": 0.03,
+    "iv_rank": 0.01,
+    "momentum_1m": 0.01,
+    "volume_surge": 0.01
+  }
+}

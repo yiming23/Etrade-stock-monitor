@@ -22,6 +22,7 @@ except ImportError:  # Python < 3.9
 
 from src.analysis.analyzer import ArticleAnalysis, PortfolioAnalysis, StockCall
 from src.etrade.portfolio import PortfolioSummary
+from src.forecast.base import ForecastResult
 from src.utils.config import Settings, PROJECT_ROOT
 from src.utils.logger import get_logger
 
@@ -82,11 +83,13 @@ class EmailSender:
         analysis: PortfolioAnalysis,
         report_type: str = "pre_market",
         accuracy_map: dict | None = None,
+        quant_results: list[ForecastResult] | None = None,
     ) -> bool:
         subject = self._build_subject(portfolio, report_type)
         html_body = self._build_html(
             portfolio, analysis, report_type,
             accuracy_map=accuracy_map or {},
+            quant_results=quant_results or [],
         )
 
         if self.backend == "gmail_api":
@@ -193,6 +196,7 @@ class EmailSender:
         analysis: PortfolioAnalysis,
         report_type: str,
         accuracy_map: dict | None = None,
+        quant_results: list[ForecastResult] | None = None,
     ) -> str:
         now = datetime.now(tz=ZoneInfo("America/New_York"))
         if report_type == "pre_market":
@@ -249,6 +253,7 @@ class EmailSender:
         stock_call_rows = self._build_stock_call_rows(
             analysis.stock_calls,
             accuracy_map=accuracy_map or {},
+            quant_results=quant_results or [],
         )
         positions_header = self._build_positions_table_header()
         positions_rows = self._build_positions_rows(portfolio)
@@ -458,11 +463,15 @@ class EmailSender:
         self,
         calls: list[StockCall],
         accuracy_map: dict | None = None,
+        quant_results: list[ForecastResult] | None = None,
     ) -> str:
         if not calls:
             return ""
 
         accuracy_map = accuracy_map or {}
+        quant_map: dict[str, ForecastResult] = {
+            r.symbol: r for r in (quant_results or [])
+        }
         rows = []
         for call in calls:
             rec = call.recommendation.upper()
@@ -503,6 +512,52 @@ class EmailSender:
                     f'{acc_icon} {acc:.0%} ({total})</span>'
                 )
 
+            # ── Quant block (shown first — medium-term signal) ────────────────
+            quant_block = ""
+            if call.symbol in quant_map:
+                q = quant_map[call.symbol]
+                q_rec     = q.recommendation.upper()
+                q_move    = q.estimated_move
+                q_conf    = q.confidence.capitalize()
+                q_narrative = q.narrative
+
+                if q.direction == "up":
+                    q_arrow, q_dir_color = "&#9650;", "#16a34a"
+                elif q.direction == "down":
+                    q_arrow, q_dir_color = "&#9660;", "#dc2626"
+                else:
+                    q_arrow, q_dir_color = "&#9654;", "#64748b"
+
+                q_rec_color = REC_COLOR.get(q_rec, "#64748b")
+
+                quant_block = f"""
+          <!-- Quant medium-term signal (shown first) -->
+          <div style="margin:0 0 7px;padding:8px 10px;border-radius:5px;
+            background-color:#f0f9ff;border-left:3px solid {q_dir_color};">
+            <div style="margin-bottom:3px;">
+              <span style="font-size:11px;font-weight:700;color:#0369a1;
+                text-transform:uppercase;letter-spacing:0.5px;">
+                &#128200; Quant &mdash; medium-term
+              </span>
+              &nbsp;&nbsp;
+              <span style="font-size:13px;font-weight:700;color:{q_dir_color};">
+                {q_arrow} {q_move}
+              </span>
+              &nbsp;
+              <span style="font-size:11px;padding:2px 7px;border-radius:3px;
+                background-color:{q_rec_color};color:#fff;font-weight:700;">
+                {q_rec}
+              </span>
+              &nbsp;
+              <span style="font-size:11px;color:#94a3b8;">
+                {q_conf} confidence
+              </span>
+            </div>
+            <span style="font-size:11px;color:#475569;line-height:1.5;">
+              {q_narrative}
+            </span>
+          </div>"""
+
             rows.append(f"""\
 <tr>
   <td class="news-td" style="padding:12px 20px;border-bottom:1px solid #f1f5f9;">
@@ -510,7 +565,7 @@ class EmailSender:
       <tr>
         <td style="vertical-align:top;">
           <!-- Symbol + price row -->
-          <table cellpadding="0" cellspacing="0" role="presentation" style="margin-bottom:6px;">
+          <table cellpadding="0" cellspacing="0" role="presentation" style="margin-bottom:8px;">
             <tr>
               <td style="vertical-align:middle;padding-right:10px;">
                 <span style="font-size:16px;font-weight:700;color:#1e293b;">{call.symbol}</span>
@@ -530,12 +585,14 @@ class EmailSender:
               </td>
             </tr>
           </table>
-          <!-- Trend + move -->
+          <!-- Quant reference panel (medium-term backdrop) -->
+          {quant_block}
+          <!-- PM recommendation (LLM — synthesizes news + quant) -->
           <p style="margin:0 0 5px;font-size:13px;color:#334155;line-height:1.4;">
             {sent_dot} <strong>{call.estimated_move}</strong> &nbsp;&mdash;&nbsp; {call.trend_narrative}
           </p>
-          <!-- Action detail -->
-          <p class="call-detail" style="margin:0 0 5px;font-size:13px;color:#1e293b;
+          <!-- Action detail (LLM already references quant inside this text) -->
+          <p class="call-detail" style="margin:0 0 6px;font-size:13px;color:#1e293b;
             background-color:#f8fafc;padding:8px 10px;border-radius:5px;
             border-left:3px solid {rec_color};line-height:1.5;">
             {call.action_detail}

@@ -69,10 +69,14 @@ class PortfolioAnalysis:
 
 _PROMPT_BASE = """\
 You are a seasoned buy-side portfolio manager with 20+ years of experience.
+You have access to both systematic quant signals (medium-term, 1–4 weeks) and today's news.
+Your job is to synthesize both when forming recommendations — not treat them separately.
 
 === PORTFOLIO HOLDINGS ===
 {positions_text}
 
+=== QUANT SIGNALS (medium-term, factor-based) ===
+{quant_context}
 === NEWS ARTICLES ===
 {news_text}
 
@@ -113,12 +117,23 @@ IMPORTANT: Include a stock_call for EVERY symbol in the portfolio holdings list.
 """
 
 # 8:30 AM — Pre-market: react to overnight news, set opening trade plan
+_QUANT_USAGE_GUIDANCE = """\
+When forming your stock_calls, treat the quant signals as your medium-term backdrop:
+- If quant and news ALIGN (both bullish or both bearish): higher conviction — say so in action_detail.
+- If quant and news DIVERGE: explain the divergence. News moves near-term; quant reflects 1-4 week factors.
+  Example: "Quant signals are bullish medium-term, but today's news creates a near-term headwind — consider waiting for the dip."
+- If quant has NO signal or low confidence: rely primarily on news.
+Keep the quant reference brief — one sentence in action_detail is enough."""
+
 PRE_MARKET_FOCUS = """\
 This is the PRE-MARKET brief (8:30 AM ET). Market opens in 1 hour.
 1. Identify the key overnight / early-morning catalysts that will move stocks at open.
 2. For each stock: predict the opening gap direction and first-hour price action.
 3. Give actionable BUY/SELL/HOLD/TRIM calls specifically for the OPEN (first 30-60 min).
-4. Flag any earnings, economic data, or Fed speakers due TODAY that could cause intraday reversals."""
+4. Flag any earnings, economic data, or Fed speakers due TODAY that could cause intraday reversals.
+5. Reference the quant signals where relevant — do the medium-term signals support or conflict with the news?
+
+""" + _QUANT_USAGE_GUIDANCE
 
 PRE_MARKET_SUMMARY = "2 sentences: overall overnight sentiment and the #1 catalyst to watch at today's open"
 PRE_MARKET_NARRATIVE = "Opening gap direction, likely first-hour move, key intraday catalysts today"
@@ -129,7 +144,10 @@ This is the MID-DAY brief (12:00 PM ET). Market has been open ~3.5 hours.
 1. Summarize what actually happened since the open — which morning calls were right/wrong.
 2. Update each position's recommendation based on morning price action and any new news.
 3. Flag any afternoon catalysts (Fed speakers, economic releases, earnings after-close).
-4. Identify positions that need attention (unusual volume, approaching stop levels, breakouts)."""
+4. Identify positions that need attention (unusual volume, approaching stop levels, breakouts).
+5. Reference the quant signals where relevant — has the morning price action confirmed or challenged the medium-term thesis?
+
+""" + _QUANT_USAGE_GUIDANCE
 
 MID_MARKET_SUMMARY = "2 sentences: how the morning session went and what changed from the pre-market thesis"
 MID_MARKET_NARRATIVE = "What happened this morning, updated stance for the afternoon session"
@@ -145,7 +163,10 @@ This is the POST-MARKET brief (4:30 PM ET). Market just closed.
 3. For any stock with upcoming earnings, give a pre-earnings recommendation:
    - Should the user hold through earnings, trim beforehand, or add?
    - Based on current setup (valuation, momentum, cost basis), what is the expected move?
-4. Rate each upcoming event as HIGH / MEDIUM / LOW impact for this specific portfolio."""
+4. Rate each upcoming event as HIGH / MEDIUM / LOW impact for this specific portfolio.
+5. Reference the quant signals where relevant — do the medium-term factor signals align with or challenge the outlook?
+
+""" + _QUANT_USAGE_GUIDANCE
 
 POST_MARKET_SUMMARY = "2 sentences: today's session result and the single most important event to watch in the coming week"
 POST_MARKET_NARRATIVE = "Today's closing pattern + what to watch overnight and tomorrow morning"
@@ -206,6 +227,7 @@ class StockAnalyzer:
         positions: list,
         report_type: str = "pre_market",
         earnings_data: dict | None = None,
+        quant_results: list | None = None,
     ) -> PortfolioAnalysis:
         """
         Analyze top cross-portfolio articles + generate per-stock PM calls.
@@ -271,6 +293,25 @@ class StockAnalyzer:
             summary_instr = PRE_MARKET_SUMMARY
             narrative_instr = PRE_MARKET_NARRATIVE
 
+        # Build quant context block (medium-term signals for LLM to reference)
+        quant_context = ""
+        if quant_results:
+            lines = [
+                "These are systematic factor signals (IC-weighted, not news-based). "
+                "Use as medium-term backdrop (1–4 week horizon).\n"
+            ]
+            for r in quant_results:
+                arrow = "▲" if r.direction == "up" else "▼" if r.direction == "down" else "→"
+                lines.append(
+                    f"  {r.symbol}: {arrow} {r.direction.upper()}  "
+                    f"rec={r.recommendation}  est={r.estimated_move}  "
+                    f"confidence={r.confidence}\n"
+                    f"    {r.narrative}"
+                )
+            quant_context = "\n".join(lines) + "\n\n"
+        else:
+            quant_context = "No quant signals available for this run.\n\n"
+
         # Build extra context block for post-market (earnings calendar)
         extra_context = ""
         if report_type == "post_market" and earnings_data:
@@ -285,6 +326,7 @@ class StockAnalyzer:
 
         prompt = _PROMPT_BASE.format(
             positions_text=positions_text,
+            quant_context=quant_context,
             news_text=news_text,
             extra_context=extra_context,
             focus_instructions=focus,

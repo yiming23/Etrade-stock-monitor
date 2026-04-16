@@ -45,6 +45,13 @@
 - Deploy workflow: edit on Mac → `git push` → `git pull && ./restart_server.sh` on server
 - Credentials (`.env`, `credentials.json`, `gmail_token.json`) copied via `scp`, never in git
 
+### [2026-04-15] Wired QuantForecaster into daily report pipeline
+- `main.py`: Added step 5b — runs `QuantForecaster.forecast()` on all portfolio positions after LLM step
+- `email/sender.py`: Added quant block per stock (light-blue panel, "Quant (medium-term)" label)
+  - Shows direction arrow, estimated move %, recommendation badge, confidence level, narrative
+  - LLM row now labeled "LLM:" to distinguish short-term (news) vs medium-term (signals)
+- Quant is fully non-fatal: if signals fail, email still sends with LLM results only
+
 ### [2026-04-16] Quant forecasting system (scaffolding complete)
 - Built `src/universe/sp500.py` — S&P 500 universe with sector → ETF mapping, weekly cached
 - Built `src/data/fetcher.py` — batch historical data fetcher, Parquet cache, options snapshot, analyst/insider data
@@ -95,7 +102,6 @@
 
 ## Next Up
 
-- [ ] Wire `QuantForecaster` into daily report (`main.py` + email display)
 - [ ] Run `--ic-analysis` on S&P 500 to validate signals with real historical data
 - [ ] Run `--walk-forward` OOS validation, update `quant_model.json` weights
 - [ ] Weekly screener run → email top 5 S&P 500 opportunities

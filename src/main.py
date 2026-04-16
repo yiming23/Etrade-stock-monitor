@@ -51,6 +51,7 @@ from src.utils.telegram_bot import make_notifier
 from src.backtest.storage import PredictionDB
 from src.backtest.engine import run_backtest
 from src.backtest.report import save_report as save_backtest_report
+from src.forecast.quant import QuantForecaster
 
 logger = get_logger(__name__)
 
@@ -88,6 +89,7 @@ class StockMonitor:
         self.news_scraper = NewsScraper(self.settings)
         self.analyzer = StockAnalyzer(self.settings)
         self.email_sender = EmailSender(self.settings)
+        self.quant_forecaster = QuantForecaster()
         self._auth: ETradeAuth | None = None
 
     # -------------------------------------------------------------------------
@@ -244,13 +246,31 @@ class StockMonitor:
         else:
             logger.info("[4/6] Skipping earnings calendar (pre/mid-market)")
 
-        # Step 5: AI analysis
-        logger.info(f"[5/6] Running {label} AI analysis...")
+        # Step 5: Quant signals (runs first — LLM will use these as context)
+        logger.info("[5/6] Running quant signal analysis (medium-term)...")
+        quant_results = []
+        try:
+            quant_results = self.quant_forecaster.forecast(
+                portfolio.positions, context={}, report_type=report_type
+            )
+            logger.info(
+                f"  Quant: {len(quant_results)} forecasts — "
+                + ", ".join(
+                    f"{r.symbol} {r.direction}({r.recommendation})"
+                    for r in quant_results
+                )
+            )
+        except Exception as e:
+            logger.warning(f"Quant forecaster failed (non-fatal): {e}")
+
+        # Step 5b: LLM analysis — sees quant signals as medium-term context
+        logger.info(f"[5b/6] Running {label} LLM analysis (with quant context)...")
         analysis = self.analyzer.analyze_top_news(
             top_articles,
             portfolio.positions,
             report_type=report_type,
             earnings_data=earnings_data,
+            quant_results=quant_results,
         )
 
         # Step 6: Send email — include per-stock accuracy summary from backtest DB
@@ -266,6 +286,7 @@ class StockMonitor:
         success = self.email_sender.send_report(
             portfolio, analysis, report_type,
             accuracy_map=accuracy_map,
+            quant_results=quant_results,
         )
 
         if success:

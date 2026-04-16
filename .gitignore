@@ -42,3 +42,6 @@ token_cache/
 
 # Prediction tracking database (personal data)
 data/predictions.db
+
+# Market data cache (rebuilt automatically by yfinance on first run)
+data/market_cache/

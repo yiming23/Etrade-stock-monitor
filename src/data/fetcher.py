@@ -19,6 +19,8 @@ Usage:
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import time
 from datetime import date, timedelta
@@ -32,6 +34,17 @@ from src.utils.config import PROJECT_ROOT
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# Symbols that have price data but no fundamentals in yfinance
+# (ETFs, commodity funds, index funds)
+_NO_FUNDAMENTALS: frozenset[str] = frozenset({
+    "GLD", "SLV", "IAU", "GDX", "GDXJ",          # gold/silver
+    "QQQ", "VOO", "SPY", "IWM", "DIA",            # broad index ETFs
+    "XLK", "XLF", "XLE", "XLV", "XLI", "XLP",    # sector ETFs
+    "XLY", "XLU", "XLB", "XLRE", "XLC",
+    "VTI", "VEA", "VWO", "AGG", "BND", "TLT",    # bond/intl ETFs
+    "USO", "UNG", "VIXY", "VXX",                   # vol/commodity
+})
 
 _CACHE_DIR   = PROJECT_ROOT / "data" / "market_cache"
 _PRICES_DIR  = _CACHE_DIR / "prices"
@@ -98,11 +111,29 @@ class MarketDataFetcher:
         cutoff = pd.Timestamp(start_date)
         return cached[cached.index >= cutoff]
 
+    def is_etf(self, symbol: str) -> bool:
+        """Return True if symbol is a known ETF / no-fundamentals ticker."""
+        if symbol.upper() in _NO_FUNDAMENTALS:
+            return True
+        # Also check quoteType from cached info (catches unlisted ETFs)
+        cache_file = _INFO_DIR / f"{symbol}.json"
+        if cache_file.exists():
+            try:
+                with open(cache_file) as f:
+                    info = json.load(f)
+                return info.get("quoteType", "").upper() == "ETF"
+            except Exception:
+                pass
+        return False
+
     def get_info(self, symbol: str, force_refresh: bool = False) -> dict:
         """
         Return yfinance .info dict for symbol.
-        Cached weekly. Returns {} on failure.
+        Cached weekly. Returns {} on failure (silently for ETFs).
         """
+        if symbol.upper() in _NO_FUNDAMENTALS:
+            return {}
+
         cache_file = _INFO_DIR / f"{symbol}.json"
 
         if not force_refresh and cache_file.exists():
@@ -112,7 +143,15 @@ class MarketDataFetcher:
                     return json.load(f)
 
         try:
-            info = yf.Ticker(symbol).info or {}
+            # Suppress yfinance's direct stderr output (e.g. 404 for ETFs)
+            with contextlib.redirect_stderr(io.StringIO()):
+                info = yf.Ticker(symbol).info or {}
+            # If yfinance returned an ETF, cache and note it
+            if info.get("quoteType", "").upper() == "ETF":
+                logger.debug(f"[{symbol}] is an ETF — fundamentals not available")
+                info = {}   # don't cache partial ETF data as fundamentals
+                return {}
+            cache_file.parent.mkdir(parents=True, exist_ok=True)
             with open(cache_file, "w") as f:
                 json.dump(info, f)
             return info
@@ -228,23 +267,19 @@ class MarketDataFetcher:
 
     def get_analyst_data(self, symbol: str) -> dict:
         """
-        Return analyst-related data:
-        {
-          "eps_estimate_current_qtr": float,
-          "eps_estimate_next_qtr": float,
-          "recommendation_mean": float,   # 1=Strong Buy ... 5=Sell
-          "num_analyst_opinions": int,
-          "earnings_history": list[dict]  # last 4 quarters actual vs estimate
-        }
-        Returns {} on failure.
+        Return analyst-related data for stocks (not ETFs).
+        Returns {} silently for ETFs / funds.
         """
+        if self.is_etf(symbol):
+            return {}
         try:
-            t = yf.Ticker(symbol)
+            t    = yf.Ticker(symbol)
             info = self.get_info(symbol)
 
             earnings_hist = []
             try:
-                eh = t.earnings_history
+                with contextlib.redirect_stderr(io.StringIO()):
+                    eh = t.earnings_history
                 if eh is not None and not eh.empty:
                     for _, row in eh.tail(8).iterrows():
                         earnings_hist.append({
@@ -270,14 +305,14 @@ class MarketDataFetcher:
     def get_insider_data(self, symbol: str) -> dict:
         """
         Return insider transaction summary for last 90 days.
-        {
-          "net_shares_90d": int,     # positive = net buying
-          "transaction_count": int,
-        }
+        Returns zeros silently for ETFs / funds (they have no insiders).
         """
+        if self.is_etf(symbol):
+            return {"net_shares_90d": 0, "transaction_count": 0}
         try:
-            t = yf.Ticker(symbol)
-            ins = t.insider_transactions
+            with contextlib.redirect_stderr(io.StringIO()):
+                t   = yf.Ticker(symbol)
+                ins = t.insider_transactions
             if ins is None or ins.empty:
                 return {"net_shares_90d": 0, "transaction_count": 0}
 
