@@ -67,6 +67,29 @@
 
 ## Quant Model Development Log
 
+### v1.1-oos-validated [2026-04-16] — Walk-forward OOS validation on 503 S&P 500 stocks
+
+**Key findings vs v1.0 priors:**
+- `momentum_12m_1m`: OOS IC +0.21 — strongest signal, weight raised to 0.35
+- `iv_rank`: **FLIPPED** — in-sample +0.14 but OOS -0.21 (look-ahead bias in in-sample test). Excluded.
+- `short_interest`: OOS IC +0.08 — actually stronger OOS than in-sample, weight raised
+- `momentum_1m`: OOS IC +0.07 — much stronger than prior suggested (was 0.01), raised to 0.12
+- `put_call_ratio`, `iv_skew`, `volume_surge`: Excluded — negative or insignificant OOS IC
+- `insider_net`: No yfinance coverage for IC computation, kept at small prior weight (0.08)
+
+**OOS weights (v1.1):**
+
+| Signal | OOS IC | Weight |
+|--------|--------|--------|
+| momentum_12m_1m | +0.21 | 0.35 |
+| analyst_revision | +0.09 | 0.15 |
+| short_interest | +0.08 | 0.14 |
+| momentum_1m | +0.07 | 0.12 |
+| sue | +0.06 | 0.10 |
+| insider_net | (prior) | 0.08 |
+| rel_strength | +0.04 | 0.06 |
+| iv_rank / iv_skew / put_call_ratio / volume_surge | ≤0 | 0.00 |
+
 ### v1.0-prior [2026-04-16] — Academic prior weights, not yet validated
 
 **Design**

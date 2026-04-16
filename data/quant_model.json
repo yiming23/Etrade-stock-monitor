@@ -1,17 +1,18 @@
 {
-  "version": "v1.0-prior",
-  "updated_at": "2026-04-15",
+  "version": "v1.1-oos-validated",
+  "updated_at": "2026-04-16",
+  "notes": "Weights from walk-forward OOS IC validation (503 S&P 500 stocks, 2y history). iv_rank, put_call_ratio, iv_skew, volume_surge excluded (negative or insignificant OOS IC). insider_net kept at small prior weight (insufficient yfinance coverage for IC computation).",
   "weights": {
-    "analyst_revision": 0.22,
-    "sue": 0.2,
-    "momentum_12m_1m": 0.18,
-    "rel_strength": 0.12,
-    "insider_net": 0.1,
-    "short_interest": 0.08,
-    "put_call_ratio": 0.04,
-    "iv_skew": 0.03,
-    "iv_rank": 0.01,
-    "momentum_1m": 0.01,
-    "volume_surge": 0.01
+    "momentum_12m_1m": 0.3502,
+    "analyst_revision": 0.1491,
+    "short_interest":   0.1382,
+    "momentum_1m":      0.1209,
+    "sue":              0.0993,
+    "insider_net":      0.0824,
+    "rel_strength":     0.0600,
+    "iv_rank":          0.0,
+    "iv_skew":          0.0,
+    "put_call_ratio":   0.0,
+    "volume_surge":     0.0
   }
 }
