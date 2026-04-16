@@ -12,11 +12,13 @@ Usage:
 
 from __future__ import annotations
 
+import io
 import json
 from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
+import requests
 
 from src.utils.config import PROJECT_ROOT
 from src.utils.logger import get_logger
@@ -52,10 +54,13 @@ def get_sp500_tickers(force_refresh: bool = False) -> list[str]:
 
     logger.info("Fetching S&P 500 universe from Wikipedia...")
     try:
-        df = pd.read_html(
+        resp = requests.get(
             "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
-            attrs={"id": "constituents"},
-        )[0]
+            headers={"User-Agent": "Mozilla/5.0 (compatible; stockmonitor-research/1.0)"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        df = pd.read_html(io.StringIO(resp.text), attrs={"id": "constituents"})[0]
         # Wikipedia uses "." in BRK.B etc — yfinance wants "-"
         tickers = df["Symbol"].str.replace(".", "-", regex=False).tolist()
         sectors = dict(zip(
