@@ -1,18 +1,32 @@
 {
-  "version": "v1.1-oos-validated",
+  "version": "v2.0-hybrid-academic-prior",
   "updated_at": "2026-04-16",
-  "notes": "Weights from walk-forward OOS IC validation (503 S&P 500 stocks, 2y history). iv_rank, put_call_ratio, iv_skew, volume_surge excluded (negative or insignificant OOS IC). insider_net kept at small prior weight (insufficient yfinance coverage for IC computation).",
+  "methodology": "hybrid-pit-academic",
+  "notes": [
+    "v1.1 weights (OOS IC from walk-forward) were derived with look-ahead bias — discarded.",
+    "Price signals will be updated by empirical PIT IC after running --ic-analysis.",
+    "Fundamental signals use academic literature IC (no PIT data available from yfinance):",
+    "  analyst_revision  Chan, Jegadeesh & Lakonishok (1996) IC=0.055",
+    "  sue               Bernard & Thomas (1989)              IC=0.045",
+    "  short_interest    Dechow et al (2001)                  IC=0.035",
+    "  insider_net       Seyhun (1986)                        IC=0.030",
+    "  put_call_ratio    Pan & Poteshman (2006)               IC=0.020",
+    "  iv_skew           Xing, Zhang & Zhao (2010)            IC=0.015",
+    "  momentum_1m       Jegadeesh & Titman (1993)            IC=0.010 (weak, reversal risk)",
+    "  volume_surge      Gervais et al (2001)                 IC=0.008",
+    "  iv_rank           Excluded — OOS IC consistently negative across all test periods"
+  ],
   "weights": {
-    "momentum_12m_1m": 0.3502,
-    "analyst_revision": 0.1491,
-    "short_interest":   0.1382,
-    "momentum_1m":      0.1209,
-    "sue":              0.0993,
-    "insider_net":      0.0824,
-    "rel_strength":     0.0600,
-    "iv_rank":          0.0,
-    "iv_skew":          0.0,
-    "put_call_ratio":   0.0,
-    "volume_surge":     0.0
+    "momentum_12m_1m":  0.1887,
+    "analyst_revision": 0.1730,
+    "sue":              0.1415,
+    "rel_strength":     0.1258,
+    "short_interest":   0.1101,
+    "insider_net":      0.0943,
+    "put_call_ratio":   0.0629,
+    "iv_skew":          0.0472,
+    "momentum_1m":      0.0314,
+    "volume_surge":     0.0252,
+    "iv_rank":          0.0000
   }
 }

@@ -166,6 +166,48 @@ point-in-time from yfinance (only current snapshots available).
 **Survivorship bias:** All periods use current S&P 500 constituents. Removed companies excluded
 → results biased upward, especially for GFC/dot-com. Noted in chart title.
 
+### [2026-04-16] IC analysis + walk-forward: look-ahead bias fix + hybrid weighting
+
+**Problem found:** Same look-ahead bias as backtest existed in IC analysis and walk-forward.
+Both called `compute_signals(sym, fetcher)` with full data, then ignored the `hist = prices.iloc[:idx]`
+they computed. Signal values were fixed at today's values for ALL historical sample dates.
+The walk-forward OOS IC results (v1.1) were therefore not trustworthy.
+
+**Changes:**
+
+- **`src/research/ic_analysis.py`** — complete rewrite:
+  - `_compute_signal_return_pairs()`: now uses pre-computed expanding mean/std, reads
+    signals at `prices.iloc[idx - N]` for each sample index — strictly no future data
+  - `walk_forward_validation()`: same PIT fix; only price signals validated
+  - Price signals analyzed: `momentum_12m_1m`, `momentum_1m`, `rel_strength`
+  - Fundamental signals (`analyst_revision`, `sue`, `short_interest`, `insider_net`, etc.)
+    NOT computed empirically — yfinance has no historical snapshots
+  - Added `_ACADEMIC_IC`: literature IC values from peer-reviewed papers, used as
+    permanent weights for fundamental signals
+  - `_ic_to_weights()`: hybrid approach — PIT IC for price signals, academic IC for fundamentals
+  - Output now labels each signal as `pit_empirical` vs `academic_prior`
+
+- **`src/forecast/quant.py`** — `_PRIOR_WEIGHTS` updated:
+  - Now derived from academic IC values (normalized to sum 1.0)
+  - Consistent with `_ACADEMIC_IC` in ic_analysis.py
+  - Each weight documented with source paper and approximate IC
+
+- **`data/quant_model.json`** — reset to v2.0-hybrid-academic-prior:
+  - v1.1 (biased OOS weights) discarded
+  - Academic IC-derived weights as new baseline
+  - Full notes on methodology and data sources
+
+**Hybrid weighting rationale:**
+  - Price signals have clean PIT history → use empirical IC (updated by --ic-analysis)
+  - Fundamental signals lack PIT data → use academic IC as permanent prior
+  - Academic IC comes from Bloomberg/Compustat studies (Jegadeesh, Bernard, Dechow, etc.)
+  - This is the industry-standard approach for systematic funds without a PIT database
+
+**Weight update workflow (after fix):**
+  1. Run `--ic-analysis` → computes PIT IC for price signals
+  2. Hybrid function blends PIT IC (price) + academic IC (fundamentals)
+  3. Writes to `quant_model.json` → live model picks up on next restart
+
 ---
 
 ## Next Up

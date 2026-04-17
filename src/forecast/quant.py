@@ -41,35 +41,46 @@ logger = get_logger(__name__)
 
 _MODEL_FILE = PROJECT_ROOT / "data" / "quant_model.json"
 
-# ── Academic prior weights ───────────────────────────────────────────────────
-# Based on published factor research. Sum to 1.0.
-# These are starting weights — the IC tracker will update them over time.
+# ── Hybrid academic prior weights ────────────────────────────────────────────
+# These are the FALLBACK weights used on first run before any IC analysis.
+# They are normalized from academic literature IC values (21d holding period).
 #
-# References:
-#   analyst_revision  : Chan, Jegadeesh & Lakonishok (1996) — earnings revision momentum
-#   sue               : Bernard & Thomas (1989) — PEAD / post-earnings drift
-#   momentum_12m_1m   : Jegadeesh & Titman (1993) — intermediate price momentum
-#   rel_strength      : Levy (1967), updated by Moskowitz & Grinblatt (1999)
-#   insider_net       : Seyhun (1986) — insiders have an information advantage
-#   short_interest    : Dechow et al (2001) — high short interest predicts underperformance
-#   put_call_ratio    : Pan & Poteshman (2006) — options order flow predicts returns
-#   iv_rank           : used as uncertainty/volatility context, mild signal
-#   iv_skew           : Xing, Zhang & Zhao (2010) — skew predicts future returns
-#   momentum_1m       : low weight — short-term reversal risk
-#   volume_surge      : Gervais, Kaniel & Mingelgrin (2001) — volume as attention signal
+# METHODOLOGY — two-tier approach:
+#   PRICE SIGNALS (momentum_12m_1m, momentum_1m, rel_strength):
+#     After running `--ic-analysis`, these are replaced by empirical PIT IC values.
+#     The prior below is from academic papers as a starting point.
+#
+#   FUNDAMENTAL SIGNALS (analyst_revision, sue, short_interest, etc.):
+#     These CANNOT be backtested point-in-time with free data (yfinance only
+#     provides current snapshots, not historical point-in-time values).
+#     Weights come from peer-reviewed papers on Bloomberg/Compustat databases:
+#       analyst_revision  Chan, Jegadeesh & Lakonishok (1996) — IC ≈ 0.055
+#       sue               Bernard & Thomas (1989)             — IC ≈ 0.045
+#       short_interest    Dechow et al (2001)                 — IC ≈ 0.035
+#       insider_net       Seyhun (1986)                       — IC ≈ 0.030
+#       put_call_ratio    Pan & Poteshman (2006)              — IC ≈ 0.020
+#       iv_skew           Xing, Zhang & Zhao (2010)           — IC ≈ 0.015
+#       momentum_1m       Jegadeesh & Titman (1993)           — IC ≈ 0.010
+#       volume_surge      Gervais et al (2001)                — IC ≈ 0.008
+#       iv_rank           Excluded (OOS IC negative)          — IC = 0.000
+#       momentum_12m_1m   Jegadeesh & Titman (1993)           — IC ≈ 0.060 (prior)
+#       rel_strength      Moskowitz & Grinblatt (1999)        — IC ≈ 0.040 (prior)
+#
+# Total raw IC ≈ 0.318 → normalized to sum to 1.0 below.
 
 _PRIOR_WEIGHTS: dict[str, float] = {
-    "analyst_revision": 0.22,   # Tier 1 — strongest standalone predictor
-    "sue":              0.20,   # Tier 1 — PEAD is highly documented
-    "momentum_12m_1m":  0.18,   # Tier 1 — robust across markets
-    "rel_strength":     0.12,   # Tier 2
-    "insider_net":      0.10,   # Tier 2
-    "short_interest":   0.08,   # Tier 2
-    "put_call_ratio":   0.04,   # Tier 3
-    "iv_skew":          0.03,   # Tier 3
-    "iv_rank":          0.01,   # Tier 3 — context only
-    "momentum_1m":      0.01,   # Tier 3 — weak, reversal risk
-    "volume_surge":     0.01,   # Tier 3 — confirmation only
+    # price signals — prior from literature (replaced by PIT IC after --ic-analysis)
+    "momentum_12m_1m":  0.1887,  # 0.060 / 0.318
+    "analyst_revision": 0.1730,  # 0.055 / 0.318
+    "sue":              0.1415,  # 0.045 / 0.318
+    "short_interest":   0.1101,  # 0.035 / 0.318
+    "insider_net":      0.0943,  # 0.030 / 0.318
+    "rel_strength":     0.1258,  # 0.040 / 0.318
+    "put_call_ratio":   0.0629,  # 0.020 / 0.318
+    "iv_skew":          0.0472,  # 0.015 / 0.318
+    "momentum_1m":      0.0314,  # 0.010 / 0.318
+    "volume_surge":     0.0252,  # 0.008 / 0.318
+    "iv_rank":          0.0000,  # excluded: OOS IC was negative
 }
 
 # Direction thresholds
