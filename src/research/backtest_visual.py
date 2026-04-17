@@ -5,9 +5,11 @@ Quant Factor Model — Historical Backtest with Visualizations
 METHODOLOGY — READ BEFORE INTERPRETING RESULTS:
 
   SIGNALS INCLUDED IN THIS BACKTEST (price-only, strictly point-in-time):
-    - momentum_12m_1m   12-month return skipping last month
-    - momentum_1m       1-month price return
-    - rel_strength      Excess return vs sector ETF
+    - momentum_12m_1m   12-month return skipping last month (Jegadeesh & Titman 1993)
+    - high_52w_ratio    Price / 52-week high (George & Hwang 2004) — momentum anchor
+    - rel_strength      Excess return vs sector ETF (Moskowitz & Grinblatt 1999)
+    - beta_12m          Rolling 12m beta vs SPY, inverted (Frazzini & Pedersen 2014 BAB)
+    - momentum_1m       1-month price return (weak; included for completeness)
 
   SIGNALS EXCLUDED (require point-in-time fundamental database):
     - analyst_revision  yfinance only provides today's consensus, not historical
@@ -23,10 +25,12 @@ METHODOLOGY — READ BEFORE INTERPRETING RESULTS:
     (bankruptcy, acquisition, etc.) are not included. This biases long-horizon
     results upward — especially for GFC / dot-com periods.
 
-  WEIGHTS (renormalized from v1.1 OOS weights, price signals only):
-    momentum_12m_1m : 0.66   (0.35 / 0.53)
-    momentum_1m     : 0.23   (0.12 / 0.53)
-    rel_strength    : 0.11   (0.06 / 0.53)
+  WEIGHTS (academic IC priors, normalized to 1.0 across price signals):
+    momentum_12m_1m : 0.316  (IC≈0.060, Jegadeesh & Titman 1993)
+    high_52w_ratio  : 0.237  (IC≈0.045, George & Hwang 2004)
+    rel_strength    : 0.211  (IC≈0.040, Moskowitz & Grinblatt 1999)
+    beta_12m        : 0.184  (IC≈0.035, Frazzini & Pedersen 2014)
+    momentum_1m     : 0.053  (IC≈0.010, weak signal)
 
 Industry-standard methodology:
   - Universe  : S&P 500 (current constituents)
@@ -84,11 +88,14 @@ _WARMUP_DAYS   = 260  # ~1yr + buffer; need enough history before first signal
 
 # ── Point-in-time weights ─────────────────────────────────────────────────────
 # Only price signals are included — we can compute these truly point-in-time.
-# Weights are renormalized from v1.1 OOS weights (sum = 1.0).
+# Weights normalized from academic IC priors (sum = 1.0).
+# Academic IC source: peer-reviewed literature on large-cap US equities, ~21d holding period.
 _PIT_WEIGHTS: dict[str, float] = {
-    "momentum_12m_1m": 0.66,
-    "momentum_1m":     0.23,
-    "rel_strength":    0.11,
+    "momentum_12m_1m": 0.316,   # IC≈0.060, Jegadeesh & Titman (1993)
+    "high_52w_ratio":  0.237,   # IC≈0.045, George & Hwang (2004)
+    "rel_strength":    0.211,   # IC≈0.040, Moskowitz & Grinblatt (1999)
+    "beta_12m":        0.184,   # IC≈0.035, Frazzini & Pedersen (2014) BAB
+    "momentum_1m":     0.053,   # IC≈0.010, weak signal
 }
 _PIT_SIGNAL_NAMES = list(_PIT_WEIGHTS.keys())
 
@@ -194,7 +201,7 @@ def run_backtest_visual(
     logger.info(f"Backtest period  : {period_label}")
     logger.info(f"Data history     : {years}y")
     logger.info(f"Universe         : {len(tickers)} tickers")
-    logger.info(f"Signals          : {', '.join(_PIT_SIGNAL_NAMES)} (price-only, PIT)")
+    logger.info(f"Signals          : {', '.join(_PIT_SIGNAL_NAMES)} (5 price signals, strictly PIT)")
 
     if years > 5:
         logger.info(
@@ -230,6 +237,7 @@ def run_backtest_visual(
     records = _collect_records(
         tickers, fetcher, years,
         sector_etf_prices=sector_etf_prices,
+        spy_prices=spy_prices,
         start_date=_start,
         end_date=_end,
     )
@@ -276,7 +284,7 @@ def run_backtest_visual(
 
     today_str = date.today().strftime("%B %d, %Y")
     bias_note = "⚠ Survivorship bias present (current S&P 500 constituents only)"
-    sig_note  = "Signals: momentum_12m_1m + momentum_1m + rel_strength  [price-only, strictly point-in-time]"
+    sig_note  = "Signals: momentum_12m_1m · high_52w_ratio · rel_strength · beta_12m · momentum_1m  [price-only, strictly PIT]"
     fig.suptitle(
         f"Quant Factor Model — Backtest  |  {today_str}\n"
         f"Universe: S&P 500 ({len(tickers)} stocks)  ·  Period: {period_label}  ·  "
@@ -316,6 +324,7 @@ def _collect_records(
     fetcher: MarketDataFetcher,
     years: int,
     sector_etf_prices: dict[str, pd.DataFrame],
+    spy_prices: Optional[pd.DataFrame] = None,
     start_date: Optional[date] = None,
     end_date:   Optional[date] = None,
 ) -> list[dict]:
@@ -329,9 +338,21 @@ def _collect_records(
     sample_date is used. No data from after sample_date touches the signal.
 
     Uses pre-computed expanding statistics for speed O(1) per sample.
+
+    Signals computed:
+      momentum_12m_1m : 12m return skipping last month
+      high_52w_ratio  : price / 52-week rolling max (George & Hwang 2004)
+      rel_strength    : excess return vs sector ETF
+      beta_12m        : rolling 12m beta vs SPY, inverted (BAB)
+      momentum_1m     : 1-month return
     """
-    records  = []
+    records   = []
     processed = 0
+
+    # Pre-process SPY for beta computation
+    spy_ret_all: Optional[pd.Series] = None
+    if spy_prices is not None and not spy_prices.empty:
+        spy_ret_all = spy_prices["Close"].pct_change()
 
     for sym in tickers:
         try:
@@ -361,6 +382,12 @@ def _collect_records(
             exp_mean_21  = ret_21.expanding(min_periods=21).mean()
             exp_std_21   = ret_21.expanding(min_periods=21).std()
 
+            # high_52w_ratio: price / rolling 252-day high
+            roll_max_252    = closes.rolling(252, min_periods=60).max()
+            ratio_52w       = closes / roll_max_252            # ∈ (0, 1]
+            exp_mean_ratio  = ratio_52w.expanding(min_periods=60).mean()
+            exp_std_ratio   = ratio_52w.expanding(min_periods=60).std()
+
             # Sector ETF aligned to stock calendar
             has_etf = not etf_df.empty
             if has_etf:
@@ -369,6 +396,23 @@ def _collect_records(
                 rel_ret_21   = ret_21 - etf_ret_21
                 exp_mean_rel = rel_ret_21.expanding(min_periods=21).mean()
                 exp_std_rel  = rel_ret_21.expanding(min_periods=21).std()
+
+            # beta_12m: rolling 252-day beta vs SPY (PIT)
+            # Cov(stock_ret, spy_ret) / Var(spy_ret) computed as rolling series.
+            has_beta = False
+            roll_beta: Optional[pd.Series] = None
+            exp_mean_beta: Optional[pd.Series] = None
+            exp_std_beta:  Optional[pd.Series] = None
+            if spy_ret_all is not None:
+                stk_ret = closes.pct_change()
+                # Align SPY to stock calendar
+                spy_ret_aligned = spy_ret_all.reindex(closes.index, method="ffill")
+                roll_cov  = stk_ret.rolling(252, min_periods=60).cov(spy_ret_aligned)
+                roll_var  = spy_ret_aligned.rolling(252, min_periods=60).var()
+                roll_beta = roll_cov / roll_var.replace(0, float("nan"))
+                exp_mean_beta = roll_beta.expanding(min_periods=60).mean()
+                exp_std_beta  = roll_beta.expanding(min_periods=60).std()
+                has_beta = True
 
             # ── Walk forward ──────────────────────────────────────────────────
             sample_indices = range(
@@ -397,6 +441,13 @@ def _collect_records(
                     s   = exp_std_252.iloc[idx]
                     sig["momentum_12m_1m"] = _zscore_clip(val, m, s)
 
+                # high_52w_ratio: price / 52-week max (PIT; includes bar at idx)
+                if idx >= 252:
+                    r = ratio_52w.iloc[idx]
+                    m = exp_mean_ratio.iloc[idx]
+                    s = exp_std_ratio.iloc[idx]
+                    sig["high_52w_ratio"] = _zscore_clip(r, m, s)
+
                 # momentum_1m: return over last 22 bars
                 if idx >= 22:
                     val = closes.iloc[idx] / closes.iloc[idx - 22] - 1
@@ -413,6 +464,15 @@ def _collect_records(
                         m   = exp_mean_rel.iloc[idx]
                         s   = exp_std_rel.iloc[idx]
                         sig["rel_strength"] = _zscore_clip(rel, m, s)
+
+                # beta_12m: rolling beta vs SPY, INVERTED (low beta = bullish)
+                if has_beta and idx >= 252:
+                    b = roll_beta.iloc[idx]
+                    if not (pd.isna(b) or math.isnan(float(b))):
+                        m = exp_mean_beta.iloc[idx]
+                        s = exp_std_beta.iloc[idx]
+                        # Invert: low beta → positive z-score
+                        sig["beta_12m"] = _zscore_clip(-float(b), -float(m), float(s))
 
                 if not sig:
                     continue
@@ -950,7 +1010,7 @@ def _print_summary(
     print(f"  L/S Sharpe ratio  : {sharpe:.2f}")
     print(f"  Hit rate (dir.)   : {hit_rate:.1%}")
     print("  ─────────────────────────────────────────────────────")
-    print("  Signals            : momentum_12m_1m + momentum_1m + rel_strength")
+    print("  Signals            : momentum_12m_1m + high_52w_ratio + rel_strength + beta_12m + momentum_1m")
     print("  Look-ahead bias    : None (strictly point-in-time price data)")
     print("  Survivorship bias  : Present (current S&P 500 constituents)")
     print("=" * 60 + "\n")

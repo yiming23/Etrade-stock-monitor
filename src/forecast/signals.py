@@ -12,11 +12,13 @@ Signals implemented (grouped by academic evidence strength):
     analyst_revision    Earnings revision momentum (Chan et al 1996)
     sue                 Standardized Unexpected Earnings / PEAD (Bernard & Thomas 1989)
     momentum_12m_1m     Intermediate momentum, skip-1-month (Jegadeesh & Titman 1993)
+    high_52w_ratio      Price / 52-week high (George & Hwang 2004) — momentum anchor
 
   TIER 2 — Moderate evidence:
     rel_strength        Relative strength vs sector ETF
     insider_net         Net insider buying (Seyhun 1986)
     short_interest      Short interest ratio (high = bearish)
+    beta_12m            Rolling 12m beta vs SPY, inverted (Frazzini & Pedersen 2014 BAB)
 
   TIER 3 — Useful context, weaker standalone:
     put_call_ratio      Options market sentiment
@@ -64,11 +66,13 @@ class SignalBundle:
     analyst_revision:  float = 0.0   # EPS estimate revision over 4 weeks
     sue:               float = 0.0   # Standardized Unexpected Earnings
     momentum_12m_1m:   float = 0.0   # 12-month minus last-month momentum
+    high_52w_ratio:    float = 0.0   # price / 52-week high (George & Hwang 2004)
 
     # Tier 2
     rel_strength:      float = 0.0   # vs sector ETF (1-month)
     insider_net:       float = 0.0   # net insider buying (90 days)
     short_interest:    float = 0.0   # inverted short ratio signal
+    beta_12m:          float = 0.0   # rolling 12m beta vs SPY (inverted; BAB premium)
 
     # Tier 3
     put_call_ratio:    float = 0.0   # options sentiment
@@ -102,7 +106,7 @@ def compute_signals(
     """
     bundle = SignalBundle(symbol=symbol)
     computed = 0
-    total = 11  # total signals attempted
+    total = 13  # total signals attempted
 
     # ── Price history ────────────────────────────────────────────────────────
     prices = fetcher.get_prices(symbol, years=2)
@@ -120,6 +124,42 @@ def compute_signals(
         ret_12m = (closes.iloc[-22] / closes.iloc[-252]) - 1   # 12 months ago to 1 month ago
         bundle.momentum_12m_1m = _zscore_clip(ret_12m, closes.pct_change(252).dropna())
         computed += 1
+
+    # ── Tier 1: 52-week high ratio (George & Hwang 2004) ────────────────────
+    # Price near its 52-week high = momentum anchor = bullish
+    # Academic IC ≈ 0.045. Pure price signal, strictly PIT.
+    if len(closes) >= 252:
+        price_now = closes.iloc[-1]
+        high_52w  = closes.tail(252).max()
+        if high_52w > 0:
+            ratio = price_now / high_52w          # always in (0, 1]
+            roll_max = closes.rolling(252, min_periods=60).max()
+            hist_ratios = (closes / roll_max).dropna()
+            bundle.high_52w_ratio = _zscore_clip(ratio, hist_ratios)
+            computed += 1
+
+    # ── Tier 2: Beta vs SPY (Frazzini & Pedersen 2014 — BAB premium) ────────
+    # Low-beta stocks earn excess risk-adjusted returns (betting against beta).
+    # Signal is INVERTED: low beta = bullish, high beta = bearish.
+    # Academic IC ≈ 0.035. Pure price signal, strictly PIT.
+    if len(closes) >= 252:
+        try:
+            spy_prices_local = fetcher.get_prices("SPY", years=2)
+            if not spy_prices_local.empty:
+                spy_ret = spy_prices_local["Close"].pct_change().dropna()
+                stk_ret = closes.pct_change().dropna()
+                common  = stk_ret.index.intersection(spy_ret.index)
+                if len(common) >= 120:
+                    sr = stk_ret[common].tail(252)
+                    mr = spy_ret[common].tail(252)
+                    var_m = mr.var()
+                    if var_m > 0:
+                        beta = sr.cov(mr) / var_m
+                        # Squash via tanh: beta=1 → 0, beta<1 → +, beta>1 → –
+                        bundle.beta_12m = _clip(-math.tanh((beta - 1.0) / 0.5))
+                        computed += 1
+        except Exception as e:
+            logger.debug(f"[{symbol}] beta_12m failed: {e}")
 
     # ── Tier 3: Momentum (1M) ────────────────────────────────────────────────
     if len(closes) >= 22:

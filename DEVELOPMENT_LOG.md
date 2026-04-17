@@ -208,6 +208,43 @@ The walk-forward OOS IC results (v1.1) were therefore not trustworthy.
   2. Hybrid function blends PIT IC (price) + academic IC (fundamentals)
   3. Writes to `quant_model.json` → live model picks up on next restart
 
+### [2026-04-16] Phase 1 new signals: high_52w_ratio + beta_12m
+
+**Rationale:** Newer literature (post-2000) validates two additional price signals that are strictly
+computable point-in-time from free price data, with no new data dependencies:
+
+- **`high_52w_ratio`** (George & Hwang 2004): `close / rolling_252d_max`. Stocks near their
+  52-week high tend to continue outperforming — the high acts as a momentum anchor. IC ≈ 0.045.
+  McLean & Pontiff (2016) found 52-week high factor decayed less post-publication than most factors.
+
+- **`beta_12m`** (Frazzini & Pedersen 2014 BAB): rolling 12-month beta vs SPY, **inverted**.
+  Low-beta stocks earn excess risk-adjusted returns (betting against beta premium). IC ≈ 0.035.
+  Signal: `beta_12m = -normalized(rolling_beta)` so low beta → positive (bullish).
+
+**Files changed:**
+- `src/forecast/signals.py` — added to `SignalBundle` dataclass + `compute_signals()`. total=13.
+- `src/research/backtest_visual.py` — PIT computation in `_collect_records()` using pre-computed
+  expanding stats + rolling beta vs SPY. `_PIT_WEIGHTS` updated to 5 signals (academic IC normalized).
+  `_collect_records()` now accepts `spy_prices` parameter.
+- `src/research/ic_analysis.py` — added to `_PRICE_SIGNALS` frozenset + `_compute_signal_return_pairs()`
+  + `walk_forward_validation()`. SPY fetched inside each function.
+- `src/forecast/quant.py` — `_PRIOR_WEIGHTS` updated to 13 signals. Total raw IC = 0.398.
+  `signal_descriptions` updated in `_build_narrative`.
+- `data/quant_model.json` — updated to v2.1-hybrid-academic-prior (13 signals).
+
+**PIT weights (backtest, 5 price signals, academic IC normalized to 1.0):**
+
+| Signal | Academic IC | PIT Weight |
+|--------|------------|------------|
+| momentum_12m_1m | 0.060 | 0.316 |
+| high_52w_ratio | 0.045 | 0.237 |
+| rel_strength | 0.040 | 0.211 |
+| beta_12m | 0.035 | 0.184 |
+| momentum_1m | 0.010 | 0.053 |
+
+**Phase 2 (deferred):** `gross_profitability`, `asset_growth`, `roe` from yfinance financials.
+These require testing yfinance financial statement coverage and cannot be PIT-backtested.
+
 ---
 
 ## Next Up

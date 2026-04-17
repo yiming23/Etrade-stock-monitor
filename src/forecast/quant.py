@@ -46,7 +46,7 @@ _MODEL_FILE = PROJECT_ROOT / "data" / "quant_model.json"
 # They are normalized from academic literature IC values (21d holding period).
 #
 # METHODOLOGY — two-tier approach:
-#   PRICE SIGNALS (momentum_12m_1m, momentum_1m, rel_strength):
+#   PRICE SIGNALS (momentum_12m_1m, high_52w_ratio, rel_strength, beta_12m, momentum_1m):
 #     After running `--ic-analysis`, these are replaced by empirical PIT IC values.
 #     The prior below is from academic papers as a starting point.
 #
@@ -65,21 +65,25 @@ _MODEL_FILE = PROJECT_ROOT / "data" / "quant_model.json"
 #       iv_rank           Excluded (OOS IC negative)          — IC = 0.000
 #       momentum_12m_1m   Jegadeesh & Titman (1993)           — IC ≈ 0.060 (prior)
 #       rel_strength      Moskowitz & Grinblatt (1999)        — IC ≈ 0.040 (prior)
+#       high_52w_ratio    George & Hwang (2004)               — IC ≈ 0.045 (prior)
+#       beta_12m          Frazzini & Pedersen (2014) BAB      — IC ≈ 0.035 (prior)
 #
-# Total raw IC ≈ 0.318 → normalized to sum to 1.0 below.
+# Total raw IC ≈ 0.398 → normalized to sum to 1.0 below.
 
 _PRIOR_WEIGHTS: dict[str, float] = {
     # price signals — prior from literature (replaced by PIT IC after --ic-analysis)
-    "momentum_12m_1m":  0.1887,  # 0.060 / 0.318
-    "analyst_revision": 0.1730,  # 0.055 / 0.318
-    "sue":              0.1415,  # 0.045 / 0.318
-    "short_interest":   0.1101,  # 0.035 / 0.318
-    "insider_net":      0.0943,  # 0.030 / 0.318
-    "rel_strength":     0.1258,  # 0.040 / 0.318
-    "put_call_ratio":   0.0629,  # 0.020 / 0.318
-    "iv_skew":          0.0472,  # 0.015 / 0.318
-    "momentum_1m":      0.0314,  # 0.010 / 0.318
-    "volume_surge":     0.0252,  # 0.008 / 0.318
+    "momentum_12m_1m":  0.1508,  # 0.060 / 0.398
+    "analyst_revision": 0.1382,  # 0.055 / 0.398
+    "sue":              0.1131,  # 0.045 / 0.398
+    "high_52w_ratio":   0.1131,  # 0.045 / 0.398
+    "rel_strength":     0.1005,  # 0.040 / 0.398
+    "short_interest":   0.0879,  # 0.035 / 0.398
+    "beta_12m":         0.0879,  # 0.035 / 0.398
+    "insider_net":      0.0754,  # 0.030 / 0.398
+    "put_call_ratio":   0.0503,  # 0.020 / 0.398
+    "iv_skew":          0.0377,  # 0.015 / 0.398
+    "momentum_1m":      0.0251,  # 0.010 / 0.398
+    "volume_surge":     0.0201,  # 0.008 / 0.398
     "iv_rank":          0.0000,  # excluded: OOS IC was negative
 }
 
@@ -258,9 +262,11 @@ class QuantForecaster(Forecaster):
             "analyst_revision":  "analyst recommendation",
             "sue":               "earnings surprise history",
             "momentum_12m_1m":   "12-month price momentum",
+            "high_52w_ratio":    "52-week high proximity",
             "rel_strength":      "sector relative strength",
             "insider_net":       "insider transaction activity",
             "short_interest":    "short interest positioning",
+            "beta_12m":          "market beta (low-beta premium)",
             "put_call_ratio":    "options sentiment (put/call)",
             "iv_skew":           "options skew",
             "iv_rank":           "implied volatility level",

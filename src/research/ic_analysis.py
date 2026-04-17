@@ -56,7 +56,14 @@ logger = get_logger(__name__)
 _IC_RESULTS_FILE = PROJECT_ROOT / "data" / "ic_results.json"
 
 # ── Price signals: validated point-in-time by this pipeline ──────────────────
-_PRICE_SIGNALS = frozenset({"momentum_12m_1m", "momentum_1m", "rel_strength"})
+# All signals here are computable strictly PIT from price data only.
+_PRICE_SIGNALS = frozenset({
+    "momentum_12m_1m",   # Jegadeesh & Titman (1993)
+    "high_52w_ratio",    # George & Hwang (2004) — 52-week high momentum anchor
+    "rel_strength",      # Moskowitz & Grinblatt (1999)
+    "beta_12m",          # Frazzini & Pedersen (2014) BAB — rolling beta, inverted
+    "momentum_1m",       # weak; included for completeness
+})
 
 # ── Academic IC priors for fundamental signals ────────────────────────────────
 # Source: peer-reviewed literature on large-cap US equities, ~21-day holding period.
@@ -87,6 +94,8 @@ _ACADEMIC_IC: dict[str, float] = {
     "volume_surge":      0.008,  # Gervais, Kaniel & Mingelgrin (2001)
     "iv_rank":           0.000,  # Excluded: theory ambiguous at 21d, OOS IC negative
 }
+# Note: momentum_12m_1m, high_52w_ratio, rel_strength, beta_12m, momentum_1m
+# are in _PRICE_SIGNALS and get empirical PIT IC — not in _ACADEMIC_IC.
 
 
 # ── Main entry point ──────────────────────────────────────────────────────────
@@ -254,10 +263,31 @@ def walk_forward_validation(
                 exp_mean_21  = ret_21.expanding(min_periods=21).mean()
                 exp_std_21   = ret_21.expanding(min_periods=21).std()
 
+                # high_52w_ratio
+                roll_max_252   = closes.rolling(252, min_periods=60).max()
+                ratio_52w      = closes / roll_max_252
+                exp_mean_ratio = ratio_52w.expanding(min_periods=60).mean()
+                exp_std_ratio  = ratio_52w.expanding(min_periods=60).std()
+
                 if etf_closes is not None:
                     rel_ret_21   = ret_21 - etf_closes.pct_change(21)
                     exp_mean_rel = rel_ret_21.expanding(min_periods=21).mean()
                     exp_std_rel  = rel_ret_21.expanding(min_periods=21).std()
+
+                # beta_12m: rolling beta vs SPY
+                roll_beta_wf:  Optional[pd.Series] = None
+                exp_mean_beta_wf: Optional[pd.Series] = None
+                exp_std_beta_wf:  Optional[pd.Series] = None
+                spy_p_wf = fetcher.get_prices("SPY", years=years)
+                if not spy_p_wf.empty:
+                    spy_ret_wf  = spy_p_wf["Close"].pct_change()
+                    stk_ret_wf  = closes.pct_change()
+                    spy_aln_wf  = spy_ret_wf.reindex(closes.index, method="ffill")
+                    roll_cov_wf = stk_ret_wf.rolling(252, min_periods=60).cov(spy_aln_wf)
+                    roll_var_wf = spy_aln_wf.rolling(252, min_periods=60).var()
+                    roll_beta_wf    = roll_cov_wf / roll_var_wf.replace(0, float("nan"))
+                    exp_mean_beta_wf = roll_beta_wf.expanding(min_periods=60).mean()
+                    exp_std_beta_wf  = roll_beta_wf.expanding(min_periods=60).std()
 
                 # Find the price index closest to test_start
                 test_ts   = pd.Timestamp(test_start)
@@ -274,6 +304,14 @@ def walk_forward_validation(
                     m, s = exp_mean_252.iloc[idx], exp_std_252.iloc[idx]
                     sig["momentum_12m_1m"] = _zscore_clip_vals(val, m, s)
 
+                if idx >= 252:
+                    r = ratio_52w.iloc[idx]
+                    m = exp_mean_ratio.iloc[idx]
+                    s = exp_std_ratio.iloc[idx]
+                    v = _zscore_clip_vals(r, m, s)
+                    if v != 0.0:
+                        sig["high_52w_ratio"] = v
+
                 if idx >= 22:
                     val = closes.iloc[idx] / closes.iloc[idx - 22] - 1
                     m, s = exp_mean_21.iloc[idx], exp_std_21.iloc[idx]
@@ -286,6 +324,19 @@ def walk_forward_validation(
                         er = etf_closes.iloc[idx] / ev - 1
                         m, s = exp_mean_rel.iloc[idx], exp_std_rel.iloc[idx]
                         sig["rel_strength"] = _zscore_clip_vals(sr - er, m, s)
+
+                if roll_beta_wf is not None and idx >= 252:
+                    b = roll_beta_wf.iloc[idx]
+                    if not (pd.isna(b) or math.isinf(float(b))):
+                        m = exp_mean_beta_wf.iloc[idx]
+                        s = exp_std_beta_wf.iloc[idx]
+                        v = _zscore_clip_vals(
+                            -float(b),
+                            -float(m) if not pd.isna(m) else 0.0,
+                            float(s) if not pd.isna(s) else 0.0,
+                        )
+                        if v != 0.0:
+                            sig["beta_12m"] = v
 
                 if not sig:
                     continue
@@ -328,7 +379,7 @@ def walk_forward_validation(
         )
     logger.info(
         "  Fundamental signals not shown here — weights from academic priors "
-        "(analyst_revision, sue, short_interest, insider_net, etc.)"
+        "(analyst_revision, sue, short_interest, insider_net, put_call_ratio, iv_skew, volume_surge)"
     )
 
     return oos_ic
@@ -348,6 +399,13 @@ def _compute_signal_return_pairs(
     For each stock: pre-compute expanding mean/std for all signals, then at
     each monthly sample index, read signal values at that index (no future data).
 
+    Signals computed (all strictly PIT, price data only):
+      momentum_12m_1m  : 12m return skipping last month
+      high_52w_ratio   : price / 52-week rolling max
+      rel_strength     : excess return vs sector ETF
+      beta_12m         : rolling 12m beta vs SPY, inverted (BAB)
+      momentum_1m      : 1-month return
+
     Returns: { period: [(signal_name, signal_value, forward_return), ...] }
     """
     prices = fetcher.get_prices(symbol, years=years)
@@ -355,7 +413,6 @@ def _compute_signal_return_pairs(
         return {}
 
     closes  = prices["Close"]
-    volumes = prices["Volume"]
 
     # ── Pre-compute rolling/expanding stats for efficiency ─────────────────────
     ret_252      = closes.pct_change(252)
@@ -364,6 +421,12 @@ def _compute_signal_return_pairs(
     exp_std_252  = ret_252.expanding(min_periods=60).std()
     exp_mean_21  = ret_21.expanding(min_periods=21).mean()
     exp_std_21   = ret_21.expanding(min_periods=21).std()
+
+    # high_52w_ratio: price / 252-day rolling max
+    roll_max_252   = closes.rolling(252, min_periods=60).max()
+    ratio_52w      = closes / roll_max_252
+    exp_mean_ratio = ratio_52w.expanding(min_periods=60).mean()
+    exp_std_ratio  = ratio_52w.expanding(min_periods=60).std()
 
     # Sector ETF for rel_strength
     etf_key    = get_sector_etf(symbol)
@@ -377,6 +440,21 @@ def _compute_signal_return_pairs(
         rel_ret_21   = ret_21 - etf_closes.pct_change(21)
         exp_mean_rel = rel_ret_21.expanding(min_periods=21).mean()
         exp_std_rel  = rel_ret_21.expanding(min_periods=21).std()
+
+    # beta_12m: rolling 252-day beta vs SPY
+    spy_prices = fetcher.get_prices("SPY", years=years)
+    roll_beta: Optional[pd.Series] = None
+    exp_mean_beta: Optional[pd.Series] = None
+    exp_std_beta:  Optional[pd.Series] = None
+    if not spy_prices.empty:
+        spy_ret     = spy_prices["Close"].pct_change()
+        stk_ret     = closes.pct_change()
+        spy_aligned = spy_ret.reindex(closes.index, method="ffill")
+        roll_cov    = stk_ret.rolling(252, min_periods=60).cov(spy_aligned)
+        roll_var    = spy_aligned.rolling(252, min_periods=60).var()
+        roll_beta   = roll_cov / roll_var.replace(0, float("nan"))
+        exp_mean_beta = roll_beta.expanding(min_periods=60).mean()
+        exp_std_beta  = roll_beta.expanding(min_periods=60).std()
 
     # ── Walk forward monthly ──────────────────────────────────────────────────
     sample_indices = range(260, len(prices) - max(forward_periods), 21)
@@ -392,6 +470,15 @@ def _compute_signal_return_pairs(
             v = _zscore_clip_vals(val, m, s)
             if v != 0.0:
                 sig["momentum_12m_1m"] = v
+
+        # high_52w_ratio: price / 52-week max (strictly PIT)
+        if idx >= 252:
+            r = ratio_52w.iloc[idx]
+            m = exp_mean_ratio.iloc[idx]
+            s = exp_std_ratio.iloc[idx]
+            v = _zscore_clip_vals(r, m, s)
+            if v != 0.0:
+                sig["high_52w_ratio"] = v
 
         # momentum_1m: 1-month return (strictly PIT)
         if idx >= 22:
@@ -411,6 +498,17 @@ def _compute_signal_return_pairs(
                 v = _zscore_clip_vals(sr - er, m, s)
                 if v != 0.0:
                     sig["rel_strength"] = v
+
+        # beta_12m: rolling beta vs SPY, INVERTED (low beta = bullish; BAB)
+        if roll_beta is not None and idx >= 252:
+            b = roll_beta.iloc[idx]
+            if not (pd.isna(b) or math.isinf(float(b))):
+                m = exp_mean_beta.iloc[idx]
+                s = exp_std_beta.iloc[idx]
+                # Invert beta: low beta → positive z-score (bullish)
+                v = _zscore_clip_vals(-float(b), -float(m) if not pd.isna(m) else 0.0, float(s) if not pd.isna(s) else 0.0)
+                if v != 0.0:
+                    sig["beta_12m"] = v
 
         if not sig:
             continue
