@@ -249,9 +249,37 @@ These require testing yfinance financial statement coverage and cannot be PIT-ba
 
 ## Next Up
 
+### Backtest debug (pending investigation)
+- [ ] **Why does SPY look so high in long-run cumulative chart?**
+  Hypothesis A: survivorship bias inflates all returns in long periods (GFC/full_cycle).
+  Hypothesis B: SPY cumulative uses 21-trading-day forward return per rebalancing date
+  (i.e. compounding ~12 returns/year), which can diverge from true buy-and-hold if dates
+  aren't exactly calendar-monthly. Need to verify `_compute_spy_monthly()` alignment.
+  Hypothesis C: for long periods (22y), compounding of even small positive monthly drifts
+  produces very large terminal values — may be correct, just looks surprising.
+  **Action:** print raw SPY monthly returns from `_compute_spy_monthly()`, compare to
+  actual SPY annualized CAGR for the same period.
+
+- [ ] **Why does the model underperform the market (L/S or Long Q5 < SPY)?**
+  Likely causes:
+  1. Survivorship bias helps SPY baseline equally — not the root cause.
+  2. Price-only signals (momentum, beta, 52w-high) are weakest in pure bull markets;
+     they shine in volatile/mean-reverting regimes (GFC, COVID). Check GFC period.
+  3. Monthly rebalancing + 21d forward return may be too short for momentum signals
+     (optimal holding is 3-12 months for Jegadeesh & Titman).
+  4. Signal weights are academic priors, not calibrated to this universe — run
+     `--ic-analysis` first, then re-run backtest with updated weights.
+  **Action:** compare recent vs gfc periods; if model beats SPY in GFC but not recent,
+  it's regime-dependent (expected). If underperforms everywhere → weight calibration issue.
+
+### Model iteration
+- [ ] Run `./run_backtests.sh --portfolio ANET,COIN` locally (recent + gfc + full_cycle)
+- [ ] Run `--ic-analysis` to calibrate price signal weights from empirical PIT IC
+- [ ] Re-run backtest after IC update — compare performance
 - [ ] Weekly screener run → email top 5 S&P 500 opportunities
 - [ ] Accumulate live backtest data (LLM + quant predictions vs actuals)
-- [ ] Run `--backtest-visual --period gfc` and `--period full_cycle` to test across regimes
 - [ ] Phase 2 model: Ridge/Logistic regression once 3-6 months of data exists
 - [ ] Re-run `--ic-analysis` + `--walk-forward` every 1-2 months to refresh weights
+- [ ] Phase 2 signals (deferred): `gross_profitability`, `asset_growth`, `roe` from
+      yfinance financials — need to test coverage/reliability first
 - [ ] Long-term: evaluate Compustat/WRDS for point-in-time fundamental data
