@@ -48,3 +48,4 @@ data/market_cache/
 
 # Backtest report PNGs (generated locally on demand)
 data/backtest_reports/
+data/sp500_universe.json
