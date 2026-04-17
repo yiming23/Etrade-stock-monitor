@@ -130,9 +130,49 @@
 
 ---
 
+### [2026-04-16] Backtest rigor overhaul — look-ahead bias fix + multi-regime support
+
+**Problem found:** `backtest_visual.py` had pervasive look-ahead bias. `compute_signals()` was called
+with the full fetcher (data up to today), so every historical index used TODAY's signal values,
+not the signal values that existed at that historical date. This inflated Sharpe to 6.35 — artifact, not real alpha.
+Fundamental signals (analyst_revision, short_interest, sue, insider_net) cannot be computed
+point-in-time from yfinance (only current snapshots available).
+
+**Changes:**
+
+- **`src/research/backtest_visual.py`** — complete rewrite:
+  - Only price-derivable signals: `momentum_12m_1m`, `momentum_1m`, `rel_strength`
+  - Strict PIT computation: for each sample `idx`, uses `prices.iloc[idx - N]` — never future data
+  - Pre-computed expanding mean/std for O(1) per sample vs previous O(n²)
+  - PIT weights renormalized from v1.1: {mom_12m: 0.66, mom_1m: 0.23, rel_strength: 0.11}
+  - `NAMED_PERIODS`: `recent`, `post_covid`, `covid`, `bull_2010s`, `gfc`, `full_cycle`, `dot_com`
+  - SPY buy-and-hold baseline on P&L chart (3 lines: L/S, Long Q5, SPY)
+  - SPY avg monthly return as dashed baseline on quintile spread chart
+  - Chart title clearly states signals included and survivorship bias warning
+
+- **`src/data/fetcher.py`** — backfill detection:
+  - `get_prices()` checks if cached data covers requested start date
+  - If not (cache has 2y, request 20y), triggers backfill fetch for missing historical window
+  - `_fetch_prices()` accepts optional `end` parameter for bounded historical fetches
+
+- **`src/research/run.py`** — new CLI args:
+  - `--period {recent,post_covid,covid,bull_2010s,gfc,full_cycle,dot_com}`
+  - `--start-date YYYY-MM-DD` / `--end-date YYYY-MM-DD` for custom ranges
+
+**Signals excluded from backtest (cannot compute PIT from free data):**
+- `analyst_revision`, `short_interest`, `sue`, `insider_net` — yfinance only provides current snapshots
+- These remain in the live daily model; gap is a known limitation without Bloomberg/Compustat PIT DB
+
+**Survivorship bias:** All periods use current S&P 500 constituents. Removed companies excluded
+→ results biased upward, especially for GFC/dot-com. Noted in chart title.
+
+---
+
 ## Next Up
 
 - [ ] Weekly screener run → email top 5 S&P 500 opportunities
 - [ ] Accumulate live backtest data (LLM + quant predictions vs actuals)
+- [ ] Run `--backtest-visual --period gfc` and `--period full_cycle` to test across regimes
 - [ ] Phase 2 model: Ridge/Logistic regression once 3-6 months of data exists
 - [ ] Re-run `--ic-analysis` + `--walk-forward` every 1-2 months to refresh weights
+- [ ] Long-term: evaluate Compustat/WRDS for point-in-time fundamental data

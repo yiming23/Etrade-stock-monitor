@@ -82,14 +82,44 @@ class MarketDataFetcher:
         Columns: Open, High, Low, Close, Volume
         Index: DatetimeIndex (tz-naive, UTC dates)
         Returns empty DataFrame if data unavailable.
+
+        Cache is keyed by symbol only (no years in filename).
+        If the requested window extends further back than what is cached,
+        a backfill fetch is triggered to extend the cache backwards.
         """
         cache_file = _PRICES_DIR / f"{symbol}.parquet"
         start_date = date.today() - timedelta(days=int(years * 365))
 
         cached = self._load_prices_cache(cache_file)
 
-        if force_refresh or cached is None or self._prices_are_stale(cached):
-            # Only fetch what we're missing
+        # Detect three scenarios that require a fetch:
+        # 1. No cache / stale (last bar too old) → normal incremental fetch
+        # 2. Cache exists but doesn't reach far enough back → backfill fetch
+        # 3. force_refresh → full refetch from start_date
+        needs_backfill = (
+            cached is not None
+            and not cached.empty
+            and cached.index[0].date() > start_date + timedelta(days=30)
+        )
+        needs_forward = force_refresh or cached is None or self._prices_are_stale(cached)
+
+        if needs_backfill:
+            # Cache is too short on the left — fetch the missing historical window
+            backfill_end = (cached.index[0].date() - timedelta(days=1)).isoformat()
+            logger.info(
+                f"[{symbol}] Backfilling price history from {start_date} → {backfill_end}"
+            )
+            old_data = self._fetch_prices(symbol, start_date.isoformat(), end=backfill_end)
+            if old_data is not None and not old_data.empty:
+                cached = (
+                    pd.concat([old_data, cached]).drop_duplicates().sort_index()
+                )
+                cached.to_parquet(cache_file)
+            # After backfill, still do the normal forward update if stale
+            if self._prices_are_stale(cached):
+                needs_forward = True
+
+        if needs_forward:
             fetch_from = (
                 (cached.index[-1].date() + timedelta(days=1)).isoformat()
                 if cached is not None and not force_refresh
@@ -98,7 +128,7 @@ class MarketDataFetcher:
             fresh = self._fetch_prices(symbol, fetch_from)
             if fresh is not None and not fresh.empty:
                 cached = (
-                    pd.concat([cached, fresh]).drop_duplicates()
+                    pd.concat([cached, fresh]).drop_duplicates().sort_index()
                     if cached is not None
                     else fresh
                 )
@@ -331,9 +361,14 @@ class MarketDataFetcher:
 
     # ── Internal helpers ─────────────────────────────────────────────────────
 
-    def _fetch_prices(self, symbol: str, start: str) -> Optional[pd.DataFrame]:
+    def _fetch_prices(
+        self,
+        symbol: str,
+        start: str,
+        end: Optional[str] = None,
+    ) -> Optional[pd.DataFrame]:
         try:
-            df = yf.Ticker(symbol).history(start=start, auto_adjust=True)
+            df = yf.Ticker(symbol).history(start=start, end=end, auto_adjust=True)
             if df.empty:
                 return None
             df.index = df.index.tz_localize(None)
